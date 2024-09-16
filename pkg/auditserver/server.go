@@ -8,32 +8,56 @@ import (
 	"github.com/spf13/viper"
 	"log/slog"
 	"os"
+	"time"
 )
 
 type Request struct {
-	MountClass          string `json:"mount_class"`
-	MountPoint          string `json:"mount_point"`
-	MountRunningVersion string `json:"mount_running_version"`
-	MountType           string `json:"mount_type"`
+	ID                  string `json:"id"`
+	ClientID            string `json:"client_id"`
 	Operation           string `json:"operation"`
+	MountPoint          string `json:"mount_point"`
+	MountType           string `json:"mount_type"`
+	MountAccessor       string `json:"mount_accessor"`
+	MountRunningVersion string `json:"mount_running_version"`
+	MountClass          string `json:"mount_class"`
+	ClientToken         string `json:"client_token"`
+	ClientTokenAccessor string `json:"client_token_accessor"`
 	Path                string `json:"path"`
+	RemoteAddress       string `json:"remote_address"`
+	RemotePort          int    `json:"remote_port"`
 }
 
 type Response struct {
-	MountAccessor             string `json:"mount_accessor"`
-	MountClass                string `json:"mount_class"`
 	MountPoint                string `json:"mount_point"`
-	MountRunningPluginVersion string `json:"mount_running_plugin_version"`
 	MountType                 string `json:"mount_type"`
+	MountAccessor             string `json:"mount_accessor"`
+	MountRunningPluginVersion string `json:"mount_running_plugin_version"`
+	MountClass                string `json:"mount_class"`
+	Data                      struct {
+		CreatedTime    string            `json:"created_time"`
+		CustomMetadata map[string]string `json:"custom_metadata"`
+		DeletionTime   string            `json:"deletion_time"`
+		Destroyed      bool              `json:"destroyed"`
+		Version        int               `json:"version"`
+	} `json:"data"`
 }
 
 type Auth struct {
-	Accessor      string `json:"accessor"`
-	ClientToken   string `json:"client_token"`
-	DisplayName   string `json:"display_name"`
+	ClientToken   string   `json:"client_token"`
+	Accessor      string   `json:"accessor"`
+	DisplayName   string   `json:"display_name"`
+	Policies      []string `json:"policies"`
+	TokenPolicies []string `json:"token_policies"`
 	PolicyResults struct {
-		Allowed bool `json:"allowed"`
+		Allowed          bool `json:"allowed"`
+		GrantingPolicies []struct {
+			Name        string `json:"name"`
+			NamespaceID string `json:"namespace_id"`
+			Type        string `json:"type"`
+		} `json:"granting_policies"`
 	} `json:"policy_results"`
+	TokenType      string    `json:"token_type"`
+	TokenIssueTime time.Time `json:"token_issue_time"`
 }
 
 type AuditLog struct {
@@ -71,6 +95,8 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 			"operation", auditLog.Request.Operation,
 			"path", auditLog.Request.Path,
 			"user", auditLog.Auth.DisplayName,
+			"client_id", auditLog.Request.ClientID,
+			"remote_addr", auditLog.Request.RemoteAddress,
 			"time", auditLog.Time,
 		}
 		as.logger.Info("Received audit log", logAttrs...)
@@ -78,7 +104,6 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 
 	return nil, gnet.Close
 }
-
 func (as *AuditServer) shouldLog(auditLog *AuditLog) bool {
 	// If no rules are defined, log all audit logs
 	if len(as.compiledExpr) == 0 {
