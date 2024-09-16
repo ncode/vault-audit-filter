@@ -1,0 +1,44 @@
+services:
+  vault_primary:
+    image: hashicorp/vault:latest
+    container_name: vault_primary
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "root"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    command: "vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200"
+  
+  vault-audit-filter_auditserver:
+    image: ncode/vault-audit-filter:dev
+    container_name: vault-audit-filter_auditserver
+    volumes:
+      - ./config:/config:ro
+      - ./logs:/var/log/
+    depends_on:
+      - vault_primary
+    command: "auditServer --config /config/config.yaml --vault.token root --vault.audit_address vault-audit-filter_auditserver:1269"
+
+  vault-audit-filter_setup:
+    image: ncode/vault-audit-filter:dev
+    container_name: vault-audit-filter_setup
+    depends_on:
+      - vault-audit-filter_auditserver
+    command: "setup --vault.token root --vault.address http://vault_primary:8200 --vault.audit_address vault-audit-filter_auditserver:1269"
+
+  vault_writer:
+    image: hashicorp/vault:latest
+    container_name: vault_writer
+    depends_on:
+      - vault-audit-filter_setup
+    volumes:
+      - ./scripts:/scripts:ro
+    environment:
+      VAULT_TOKEN: root
+      VAULT_ADDR: http://vault_primary:8200
+    cap_add:
+      - IPC_LOCK
+    entrypoint: "/scripts/writer.sh"
+

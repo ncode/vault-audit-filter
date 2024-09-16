@@ -1,0 +1,22 @@
+rule_groups:
+  - name: "normal_operations"
+    rules:
+      - 'Auth.PolicyResults.Allowed == true'
+    log_file:
+      file_path: "/var/log/vault_normal_operations.log"
+      max_size: 100
+      max_backups: 5
+      max_age: 30
+      compress: true
+
+  - name: "critical_events"
+    rules:
+      - 'Request.Operation == "delete" && Auth.PolicyResults.Allowed == true'
+      - 'Request.Path startsWith "secret/metadata/" && Auth.PolicyResults.Allowed == true'
+      - 'Request.Path == "secret/data/myapp/database" && Request.Operation == "update"'
+    log_file:
+      file_path: "/var/log/vault_critical_events.log"
+      max_size: 100
+      max_backups: 5
+      max_age: 30
+      compress: true
