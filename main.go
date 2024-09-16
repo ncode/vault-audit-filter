@@ -15,7 +15,7 @@ limitations under the License.
 */
 package main
 
-import "github.com/ncode/courier/cmd"
+import "github.com/ncode/vault-audit-filter/cmd"
 
 func main() {
 	cmd.Execute()

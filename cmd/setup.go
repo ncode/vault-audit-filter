@@ -18,7 +18,7 @@ package cmd
 import (
 	"os"
 
-	"github.com/ncode/courier/pkg/vault"
+	"github.com/ncode/vault-audit-filter/pkg/vault"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )

@@ -85,7 +85,7 @@ func initConfig() {
 		home, err := os.UserHomeDir()
 		cobra.CheckErr(err)
 
-		// Search config in home directory with name ".courier" (without extension).
+		// Search config in home directory with name ".vault-audit-filter" (without extension).
 		viper.AddConfigPath(home)
 		viper.SetConfigType("yaml")
 		viper.SetConfigName(".vault-audit-filter")
@@ -107,5 +107,9 @@ func initConfig() {
 	if viper.GetString("vault.token") == "" {
 		logger.Error("vault.token is required")
 		os.Exit(1)
+	}
+
+	if !viper.IsSet("rules") || len(viper.GetStringSlice("rules")) == 0 {
+		logger.Info("No rules defined in configuration; all audit logs will be printed")
 	}
 }

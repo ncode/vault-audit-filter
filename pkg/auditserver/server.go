@@ -3,6 +3,7 @@ package auditserver
 import (
 	"encoding/json"
 	"github.com/expr-lang/expr"
+	"github.com/expr-lang/expr/vm"
 	"github.com/panjf2000/gnet"
 	"github.com/spf13/viper"
 	"log/slog"
@@ -46,7 +47,7 @@ type AuditLog struct {
 }
 
 type CompiledRule struct {
-	Program *expr.Program
+	Program *vm.Program
 }
 
 type AuditServer struct {
@@ -79,6 +80,11 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 }
 
 func (as *AuditServer) shouldLog(auditLog *AuditLog) bool {
+	// If no rules are defined, log all audit logs
+	if len(as.compiledExpr) == 0 {
+		return true
+	}
+
 	for _, compiledRule := range as.compiledExpr {
 		output, err := expr.Run(compiledRule.Program, auditLog)
 		if err != nil {
