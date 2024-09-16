@@ -55,8 +55,7 @@ type AuditLog struct {
 
 type AuditServer struct {
 	*gnet.EventServer
-	logger    *slog.Logger
-	publisher *redis.Client
+	logger *slog.Logger
 }
 
 func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet.Action) {
@@ -96,11 +95,6 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 func New(logger *slog.Logger, publisher *redis.Client) *AuditServer {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	}
-	if publisher == nil {
-		publisher = redis.NewClient(&redis.Options{
-			Addr: "localhost:6379",
-		})
 	}
 	return &AuditServer{
 		logger: logger,
