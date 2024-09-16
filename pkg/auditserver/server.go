@@ -1,20 +1,12 @@
 package auditserver
 
 import (
-	"bytes"
 	"encoding/json"
+	"github.com/expr-lang/expr"
 	"github.com/panjf2000/gnet"
-	"github.com/redis/go-redis/v9"
+	"github.com/spf13/viper"
 	"log/slog"
 	"os"
-)
-
-var (
-	operationUpdate = []byte(`"operation":"update"`)
-	operationCreate = []byte(`"operation":"create"`)
-	operationDelete = []byte(`"operation":"delete"`)
-	allowedPolicy   = []byte(`"policy_results":{"allowed":true`)
-	mountTypeKV     = []byte(`"mount_type":"kv"`)
 )
 
 type Request struct {
@@ -53,27 +45,18 @@ type AuditLog struct {
 	RemoteAddr string   `json:"remote_addr"`
 }
 
+type CompiledRule struct {
+	Program *expr.Program
+}
+
 type AuditServer struct {
 	*gnet.EventServer
-	logger *slog.Logger
+	logger       *slog.Logger
+	compiledExpr []CompiledRule
 }
 
 func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet.Action) {
-	if !bytes.Contains(frame, mountTypeKV) {
-		// Skip events that are not kv, we only care about kv at the moment
-		return nil, gnet.Close
-	}
-
-	if !bytes.Contains(frame, allowedPolicy) {
-		// Skip events that are not allowed
-		return nil, gnet.Close
-	}
-
-	if !bytes.Contains(frame, operationUpdate) && !bytes.Contains(frame, operationCreate) && !bytes.Contains(frame, operationDelete) {
-		// Skip events that are not relevant for courier
-		return nil, gnet.Close
-	}
-
+	// Parse the audit log
 	var auditLog AuditLog
 	err := json.Unmarshal(frame, &auditLog)
 	if err != nil {
@@ -81,22 +64,57 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 		return nil, gnet.Close
 	}
 
-	if auditLog.Auth.PolicyResults.Allowed == true && auditLog.Response.MountType == "kv" {
+	// Apply the rules using expr
+	if as.shouldLog(&auditLog) {
 		logAttrs := []any{
 			"operation", auditLog.Request.Operation,
 			"path", auditLog.Request.Path,
+			"user", auditLog.Auth.DisplayName,
+			"time", auditLog.Time,
 		}
 		as.logger.Info("Received audit log", logAttrs...)
 	}
 
-	return
+	return nil, gnet.Close
 }
 
-func New(logger *slog.Logger, publisher *redis.Client) *AuditServer {
+func (as *AuditServer) shouldLog(auditLog *AuditLog) bool {
+	for _, compiledRule := range as.compiledExpr {
+		output, err := expr.Run(compiledRule.Program, auditLog)
+		if err != nil {
+			as.logger.Error("Error evaluating rule", "error", err)
+			continue
+		}
+		if match, ok := output.(bool); ok && match {
+			return true
+		}
+	}
+	return false
+}
+
+func New(logger *slog.Logger) *AuditServer {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
+
+	// Load and compile rules from configuration
+	var ruleStrings []string
+	if err := viper.UnmarshalKey("rules", &ruleStrings); err != nil {
+		logger.Error("Failed to load rules", "error", err)
+	}
+
+	var compiledExpr []CompiledRule
+	for _, ruleStr := range ruleStrings {
+		program, err := expr.Compile(ruleStr, expr.Env(&AuditLog{}))
+		if err != nil {
+			logger.Error("Failed to compile rule", "rule", ruleStr, "error", err)
+			continue
+		}
+		compiledExpr = append(compiledExpr, CompiledRule{Program: program})
+	}
+
 	return &AuditServer{
-		logger: logger,
+		logger:       logger,
+		compiledExpr: compiledExpr,
 	}
 }

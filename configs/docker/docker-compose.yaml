@@ -11,64 +11,28 @@ services:
       - IPC_LOCK
     command: "vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200"
   
-  vault_replica_red:
-    image: hashicorp/vault:latest
-    container_name: vault_replica_red
-    ports:
-      - "8201:8200"
-    environment:
-      VAULT_DEV_ROOT_TOKEN_ID: "root"
-      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
-    cap_add:
-      - IPC_LOCK
-    command: "vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200"
-
-  vault_replica_green:
-    image: hashicorp/vault:latest
-    container_name: vault_replica_green
-    ports:
-      - "8202:8200"
-    environment:
-      VAULT_DEV_ROOT_TOKEN_ID: "root"
-      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
-    cap_add:
-      - IPC_LOCK
-    command: "vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200"
-
-  vault_replica_blue:
-    image: hashicorp/vault:latest
-    container_name: vault_replica_blue
-    ports:
-      - "8203:8200"
-    environment:
-      VAULT_DEV_ROOT_TOKEN_ID: "root"
-      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
-    cap_add:
-      - IPC_LOCK
-    command: "vault server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200"
-
-  courier_auditserver:
-    image: ncode/courier:dev
-    container_name: courier_auditserver
+  vault-audit-filter_auditserver:
+    image: ncode/vault-audit-filter:dev
+    container_name: vault-audit-filter_auditserver
     depends_on:
       - vault_primary
       - vault_replica_red
       - vault_replica_green
       - vault_replica_blue
-    command: "auditServer --vault.source.token root --vault.audit_address courier_auditserver:1269"
+    command: "auditServer --vault.token root --vault.audit_address vault-audit-filter_auditserver:1269"
 
-  courier_setup:
-    image: ncode/courier:dev
-    container_name: courier_setup
+  vault-audit-filter_setup:
+    image: ncode/vault-audit-filter:dev
+    container_name: vault-audit-filter_setup
     depends_on:
-      - courier_auditserver
-    command: "setup --vault.source.token root --vault.source.address http://vault_primary:8200 --vault.audit_address courier_auditserver:1269"
+      - vault-audit-filter_auditserver
+    command: "setup --vault.token root --vault.address http://vault_primary:8200 --vault.audit_address vault-audit-filter_auditserver:1269"
 
   vault_writer:
     image: hashicorp/vault:latest
     container_name: vault_writer
     depends_on:
-      - courier_setup
+      - vault-audit-filter_setup
     volumes:
       - ./scripts:/scripts:ro
     environment:

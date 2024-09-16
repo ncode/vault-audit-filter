@@ -1,3 +1,3 @@
 FROM scratch
-COPY courier /courier
-ENTRYPOINT ["/courier"]
+COPY vault-audit-filter /vault-audit-filter
+ENTRYPOINT ["/vault-audit-filter"]
