@@ -1,5 +1,5 @@
 /*
-Copyright © 2024 Juliano Martinez
+Copyright © 2024 Juliano Martinez <juliano@martinez.io>
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ var cfgFile string
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "courier",
+	Use:   "vault-audit-filter",
 	Short: "A brief description of your application",
 	Long: `A longer description that spans multiple lines and likely contains
 examples and usage of using your application. For example:
@@ -63,10 +63,10 @@ func init() {
 	// Cobra supports persistent flags, which, if defined here,
 	// will be global for your application.
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.courier.yaml)")
-	rootCmd.PersistentFlags().String("vault.source.address", "http://127.0.0.1:8200", "Vault source address")
-	rootCmd.PersistentFlags().String("vault.source.token", "", "Vault source token")
-	rootCmd.PersistentFlags().String("vault.audit_path", "/courier", "Vault audit path")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.vault-audit-filter.yaml)")
+	rootCmd.PersistentFlags().String("vault.address", "http://127.0.0.1:8200", "Vault source address")
+	rootCmd.PersistentFlags().String("vault.token", "", "Vault source token")
+	rootCmd.PersistentFlags().String("vault.audit_path", "/vault-audit-filter", "Vault audit path")
 	rootCmd.PersistentFlags().String("vault.audit_address", "127.0.0.1:1269", "Courier audit device address to receive the audit")
 	rootCmd.PersistentFlags().String("vault.audit_description", "Courier audit device", "Vault audit description")
 
@@ -88,11 +88,11 @@ func initConfig() {
 		// Search config in home directory with name ".courier" (without extension).
 		viper.AddConfigPath(home)
 		viper.SetConfigType("yaml")
-		viper.SetConfigName(".courier")
+		viper.SetConfigName(".vault-audit-filter")
 	}
 
-	viper.BindPFlag("vault.source.address", rootCmd.PersistentFlags().Lookup("vault.source.address"))
-	viper.BindPFlag("vault.source.token", rootCmd.PersistentFlags().Lookup("vault.source.token"))
+	viper.BindPFlag("vault.address", rootCmd.PersistentFlags().Lookup("vault.address"))
+	viper.BindPFlag("vault.token", rootCmd.PersistentFlags().Lookup("vault.token"))
 	viper.BindPFlag("vault.audit_path", rootCmd.PersistentFlags().Lookup("vault.audit_path"))
 	viper.BindPFlag("vault.audit_address", rootCmd.PersistentFlags().Lookup("vault.audit_address"))
 	viper.BindPFlag("vault.audit_description", rootCmd.PersistentFlags().Lookup("vault.audit_description"))
@@ -104,8 +104,8 @@ func initConfig() {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	}
 
-	if viper.GetString("vault.source.token") == "" {
-		logger.Error("vault.source.token is required")
+	if viper.GetString("vault.token") == "" {
+		logger.Error("vault.token is required")
 		os.Exit(1)
 	}
 }

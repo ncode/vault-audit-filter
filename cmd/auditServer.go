@@ -17,7 +17,7 @@ package cmd
 
 import (
 	"fmt"
-	"github.com/ncode/courier/pkg/auditserver"
+	"github.com/ncode/vault-audit-filter/pkg/auditserver"
 	"github.com/panjf2000/gnet"
 	"github.com/spf13/viper"
 	"log"

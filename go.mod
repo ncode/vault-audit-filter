@@ -3,6 +3,7 @@ module github.com/ncode/vault-audit-filter
 go 1.22.3
 
 require (
+	github.com/expr-lang/expr v1.16.9
 	github.com/hashicorp/vault/api v1.14.0
 	github.com/ncode/courier v0.0.0-20240805115708-0d51f4845b17
 	github.com/panjf2000/gnet v1.6.7
@@ -47,7 +48,7 @@ require (
 	github.com/spf13/cast v1.6.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
-	github.com/tidwall/redcon v1.6.2
+	github.com/tidwall/redcon v1.6.2 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect

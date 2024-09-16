@@ -123,10 +123,6 @@ func (k K8sAuth) Authenticate(client *vault.Client) error {
 	return nil
 }
 
-func (k K8sAuth) ConfigureTLS(*vault.Config) error {
-	return nil
-}
-
 func NewVaultClient(address string, authMethod AuthMethod) (*VaultClient, error) {
 	config := vault.DefaultConfig()
 	config.Address = address
@@ -155,33 +151,6 @@ func NewVaultClient(address string, authMethod AuthMethod) (*VaultClient, error)
 	}
 
 	return &VaultClient{client}, nil
-}
-
-func (vc *VaultClient) ReadSecret(path string) (map[string]interface{}, error) {
-	secret, err := vc.Logical().Read(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read secret: %w", err)
-	}
-	if secret == nil {
-		return nil, fmt.Errorf("secret not found")
-	}
-	return secret.Data, nil
-}
-
-func (vc *VaultClient) WriteSecret(path string, data map[string]interface{}) error {
-	_, err := vc.Logical().Write(path, data)
-	if err != nil {
-		return fmt.Errorf("failed to write secret: %w", err)
-	}
-	return nil
-}
-
-func (vc *VaultClient) DeleteSecret(path string) error {
-	_, err := vc.Logical().Delete(path)
-	if err != nil {
-		return fmt.Errorf("failed to delete secret: %w", err)
-	}
-	return nil
 }
 
 func (vc *VaultClient) EnableAuditDevice(path, type_, description string, options map[string]string) error {
