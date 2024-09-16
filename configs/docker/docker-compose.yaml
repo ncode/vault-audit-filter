@@ -14,9 +14,12 @@ services:
   vault-audit-filter_auditserver:
     image: ncode/vault-audit-filter:dev
     container_name: vault-audit-filter_auditserver
+    volumes:
+      - ./config:/config:ro
+      - ./logs:/var/log/
     depends_on:
       - vault_primary
-    command: "auditServer --vault.token root --vault.audit_address vault-audit-filter_auditserver:1269"
+    command: "auditServer --config /config/config.yaml --vault.token root --vault.audit_address vault-audit-filter_auditserver:1269"
 
   vault-audit-filter_setup:
     image: ncode/vault-audit-filter:dev

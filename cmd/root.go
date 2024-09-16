@@ -109,7 +109,7 @@ func initConfig() {
 		os.Exit(1)
 	}
 
-	if !viper.IsSet("rules") || len(viper.GetStringSlice("rules")) == 0 {
+	if !viper.IsSet("rule_groups") || len(viper.GetStringSlice("rule_groups")) == 0 {
 		logger.Info("No rules defined in configuration; all audit logs will be printed")
 	}
 }

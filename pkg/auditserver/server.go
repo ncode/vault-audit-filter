@@ -6,6 +6,8 @@ import (
 	"github.com/expr-lang/expr/vm"
 	"github.com/panjf2000/gnet"
 	"github.com/spf13/viper"
+	"gopkg.in/natefinch/lumberjack.v2"
+	"log"
 	"log/slog"
 	"os"
 	"time"
@@ -34,11 +36,13 @@ type Response struct {
 	MountRunningPluginVersion string `json:"mount_running_plugin_version"`
 	MountClass                string `json:"mount_class"`
 	Data                      struct {
-		CreatedTime    string            `json:"created_time"`
-		CustomMetadata map[string]string `json:"custom_metadata"`
-		DeletionTime   string            `json:"deletion_time"`
-		Destroyed      bool              `json:"destroyed"`
-		Version        int               `json:"version"`
+		CasRequired        bool   `json:"cas_required"`
+		CreatedTime        string `json:"created_time"`
+		CurrentVersion     int    `json:"current_version"`
+		DeleteVersionAfter string `json:"delete_version_after"`
+		MaxVersions        int    `json:"max_versions"`
+		OldestVersion      int    `json:"oldest_version"`
+		UpdatedTime        string `json:"updated_time"`
 	} `json:"data"`
 }
 
@@ -74,46 +78,65 @@ type CompiledRule struct {
 	Program *vm.Program
 }
 
+type RuleGroup struct {
+	Name          string
+	CompiledRules []CompiledRule
+	Logger        *log.Logger
+}
+
+type RuleGroupConfig struct {
+	Name    string        `mapstructure:"name"`
+	Rules   []string      `mapstructure:"rules"`
+	LogFile LogFileConfig `mapstructure:"log_file"`
+}
+
+type LogFileConfig struct {
+	FilePath   string `mapstructure:"file_path"`
+	MaxSize    int    `mapstructure:"max_size"`
+	MaxBackups int    `mapstructure:"max_backups"`
+	MaxAge     int    `mapstructure:"max_age"`
+	Compress   bool   `mapstructure:"compress"`
+}
+
 type AuditServer struct {
 	*gnet.EventServer
-	logger       *slog.Logger
-	compiledExpr []CompiledRule
+	logger     *slog.Logger
+	ruleGroups []RuleGroup
 }
 
 func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet.Action) {
-	// Parse the audit log
+	// Parse the audit log for rule evaluation
 	var auditLog AuditLog
 	err := json.Unmarshal(frame, &auditLog)
 	if err != nil {
+		// Log the error using the service logger
 		as.logger.Error("Error parsing audit log", "error", err)
 		return nil, gnet.Close
 	}
 
-	// Apply the rules using expr
-	if as.shouldLog(&auditLog) {
-		logAttrs := []any{
-			"operation", auditLog.Request.Operation,
-			"path", auditLog.Request.Path,
-			"user", auditLog.Auth.DisplayName,
-			"client_id", auditLog.Request.ClientID,
-			"remote_addr", auditLog.Request.RemoteAddress,
-			"time", auditLog.Time,
+	// Check each rule group
+	for _, rg := range as.ruleGroups {
+		if rg.shouldLog(&auditLog) {
+			as.logger.Info("Matched rule group", "group", rg.Name)
+			// Write the raw frame directly to the group's log file
+			rg.Logger.Print(string(frame))
+			// Uncomment the following line to prevent logging to multiple groups
+			// break
 		}
-		as.logger.Info("Received audit log", logAttrs...)
 	}
 
 	return nil, gnet.Close
 }
-func (as *AuditServer) shouldLog(auditLog *AuditLog) bool {
-	// If no rules are defined, log all audit logs
-	if len(as.compiledExpr) == 0 {
+
+func (rg *RuleGroup) shouldLog(auditLog *AuditLog) bool {
+	if len(rg.CompiledRules) == 0 {
 		return true
 	}
 
-	for _, compiledRule := range as.compiledExpr {
+	for _, compiledRule := range rg.CompiledRules {
 		output, err := expr.Run(compiledRule.Program, auditLog)
 		if err != nil {
-			as.logger.Error("Error evaluating rule", "error", err)
+			// Optionally log the error
 			continue
 		}
 		if match, ok := output.(bool); ok && match {
@@ -128,24 +151,47 @@ func New(logger *slog.Logger) *AuditServer {
 		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 
-	// Load and compile rules from configuration
-	var ruleStrings []string
-	if err := viper.UnmarshalKey("rules", &ruleStrings); err != nil {
-		logger.Error("Failed to load rules", "error", err)
+	// Load rule groups from configuration
+	var ruleGroupConfigs []RuleGroupConfig
+	if err := viper.UnmarshalKey("rule_groups", &ruleGroupConfigs); err != nil {
+		logger.Error("Failed to load rule groups", "error", err)
 	}
 
-	var compiledExpr []CompiledRule
-	for _, ruleStr := range ruleStrings {
-		program, err := expr.Compile(ruleStr, expr.Env(&AuditLog{}))
-		if err != nil {
-			logger.Error("Failed to compile rule", "rule", ruleStr, "error", err)
-			continue
+	var ruleGroups []RuleGroup
+	for _, rgConfig := range ruleGroupConfigs {
+		// Compile rules
+		var compiledRules []CompiledRule
+		for _, ruleStr := range rgConfig.Rules {
+			program, err := expr.Compile(ruleStr, expr.Env(&AuditLog{}))
+			if err != nil {
+				logger.Error("Failed to compile rule", "rule", ruleStr, "error", err)
+				continue
+			}
+			compiledRules = append(compiledRules, CompiledRule{Program: program})
 		}
-		compiledExpr = append(compiledExpr, CompiledRule{Program: program})
+
+		// Configure logger for the rule group
+		logFileConfig := rgConfig.LogFile
+		logFile := &lumberjack.Logger{
+			Filename:   logFileConfig.FilePath,
+			MaxSize:    logFileConfig.MaxSize,
+			MaxBackups: logFileConfig.MaxBackups,
+			MaxAge:     logFileConfig.MaxAge,
+			Compress:   logFileConfig.Compress,
+		}
+		groupLogger := log.New(logFile, "", 0)
+
+		// Create RuleGroup
+		ruleGroup := RuleGroup{
+			Name:          rgConfig.Name,
+			CompiledRules: compiledRules,
+			Logger:        groupLogger,
+		}
+		ruleGroups = append(ruleGroups, ruleGroup)
 	}
 
 	return &AuditServer{
-		logger:       logger,
-		compiledExpr: compiledExpr,
+		logger:     logger,
+		ruleGroups: ruleGroups,
 	}
 }
