@@ -42,11 +42,6 @@ type JWTAuth struct {
 	JWT  string
 }
 
-type K8sAuth struct {
-	Role string
-	JWT  string
-}
-
 func (t TokenAuth) Authenticate(client *vault.Client) error {
 	client.SetToken(t.Token)
 	return nil
@@ -107,19 +102,6 @@ func (j JWTAuth) Authenticate(client *vault.Client) error {
 }
 
 func (j JWTAuth) ConfigureTLS(*vault.Config) error {
-	return nil
-}
-
-func (k K8sAuth) Authenticate(client *vault.Client) error {
-	data := map[string]interface{}{
-		"role": k.Role,
-		"jwt":  k.JWT,
-	}
-	secret, err := client.Logical().Write("auth/kubernetes/login", data)
-	if err != nil {
-		return fmt.Errorf("failed to authenticate with Kubernetes: %w", err)
-	}
-	client.SetToken(secret.Auth.ClientToken)
 	return nil
 }
 
