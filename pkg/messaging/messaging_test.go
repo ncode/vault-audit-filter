@@ -121,3 +121,32 @@ func TestMattermostWebhookMessenger_SendError(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected status code: 500")
 }
+
+func TestNewMattermostWebhookMessenger(t *testing.T) {
+	webhookURL := "https://mattermost.example.com/hooks/abc123"
+	messenger := NewMattermostWebhookMessenger(webhookURL)
+
+	assert.NotNil(t, messenger, "NewMattermostWebhookMessenger should return a non-nil messenger")
+	assert.Equal(t, webhookURL, messenger.webhookURL, "Webhook URL should be set correctly")
+
+	// Test with empty webhookURL
+	emptyMessenger := NewMattermostWebhookMessenger("")
+	assert.NotNil(t, emptyMessenger, "NewMattermostWebhookMessenger should return a non-nil messenger even with empty webhook URL")
+	assert.Empty(t, emptyMessenger.webhookURL, "Webhook URL should be empty")
+}
+
+func TestMattermostWebhookMessenger_SendInvalidURL(t *testing.T) {
+	// Use an invalid URL
+	messenger := NewMattermostWebhookMessenger("http://[::1]:NamedPort")
+	err := messenger.Send("Test message")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to send message")
+}
+
+func TestMattermostWebhookMessenger_SendEmptyURL(t *testing.T) {
+	// Use an empty webhook URL
+	messenger := NewMattermostWebhookMessenger("")
+	err := messenger.Send("Test message")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to send message")
+}
