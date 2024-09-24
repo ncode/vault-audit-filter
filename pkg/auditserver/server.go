@@ -2,8 +2,10 @@ package auditserver
 
 import (
 	"encoding/json"
+	"fmt"
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
+	"github.com/ncode/vault-audit-filter/pkg/messaging"
 	"github.com/panjf2000/gnet"
 	"github.com/spf13/viper"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -82,12 +84,22 @@ type RuleGroup struct {
 	Name          string
 	CompiledRules []CompiledRule
 	Logger        *log.Logger
+	Messenger     messaging.Messenger
+}
+
+type Messaging struct {
+	Type       string `mapstructure:"type"`
+	Token      string `mapstructure:"token"`
+	Channel    string `mapstructure:"channel"`
+	URL        string `mapstructure:"url"`
+	WebhookURL string `mapstructure:"webhook_url"`
 }
 
 type RuleGroupConfig struct {
-	Name    string        `mapstructure:"name"`
-	Rules   []string      `mapstructure:"rules"`
-	LogFile LogFileConfig `mapstructure:"log_file"`
+	Name      string        `mapstructure:"name"`
+	Rules     []string      `mapstructure:"rules"`
+	LogFile   LogFileConfig `mapstructure:"log_file"`
+	Messaging Messaging     `mapstructure:"messaging"`
 }
 
 type LogFileConfig struct {
@@ -117,6 +129,14 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 	// Check each rule group
 	for _, rg := range as.ruleGroups {
 		if rg.shouldLog(&auditLog) {
+			// Send notification if messenger is configured
+			if rg.Messenger != nil {
+				message := fmt.Sprintf("Matched rule group: %s\nAudit log: %s", rg.Name, string(frame))
+				if err := rg.Messenger.Send(message); err != nil {
+					as.logger.Error("Failed to send notification", "error", err)
+				}
+			}
+
 			as.logger.Info("Matched rule group", "group", rg.Name)
 			// Write the raw frame directly to the group's log file
 			rg.Logger.Print(string(frame))
@@ -181,11 +201,21 @@ func New(logger *slog.Logger) *AuditServer {
 		}
 		groupLogger := log.New(logFile, "", 0)
 
+		// Configure messenger
+		var messenger messaging.Messenger
+		switch rgConfig.Messaging.Type {
+		case "mattermost":
+			messenger = messaging.NewMattermostMessenger(rgConfig.Messaging.URL, rgConfig.Messaging.Token, rgConfig.Messaging.Channel)
+		case "mattermost_webhook":
+			messenger = messaging.NewMattermostWebhookMessenger(rgConfig.Messaging.WebhookURL)
+		}
+
 		// Create RuleGroup
 		ruleGroup := RuleGroup{
 			Name:          rgConfig.Name,
 			CompiledRules: compiledRules,
 			Logger:        groupLogger,
+			Messenger:     messenger,
 		}
 		ruleGroups = append(ruleGroups, ruleGroup)
 	}
