@@ -208,6 +208,10 @@ func New(logger *slog.Logger) *AuditServer {
 			messenger = messaging.NewMattermostMessenger(rgConfig.Messaging.URL, rgConfig.Messaging.Token, rgConfig.Messaging.Channel)
 		case "mattermost_webhook":
 			messenger = messaging.NewMattermostWebhookMessenger(rgConfig.Messaging.WebhookURL)
+		default:
+			if rgConfig.Messaging.Type != "" {
+				logger.Error("Invalid messenger type", "type", rgConfig.Messaging.Type)
+			}
 		}
 
 		// Create RuleGroup

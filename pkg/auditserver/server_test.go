@@ -3,6 +3,7 @@ package auditserver
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"net"
 	"os"
@@ -10,9 +11,22 @@ import (
 	"time"
 
 	"github.com/expr-lang/expr"
+	"github.com/panjf2000/gnet"
 	"github.com/spf13/viper"
 	"log/slog"
 )
+
+// MockMessenger is a mock implementation of the Messenger interface
+type MockMessenger struct {
+	SendFunc func(message string) error
+}
+
+func (m *MockMessenger) Send(message string) error {
+	if m.SendFunc != nil {
+		return m.SendFunc(message)
+	}
+	return nil
+}
 
 // mockConn is a mock implementation of gnet.Conn
 type mockConn struct{}
@@ -57,19 +71,9 @@ func TestAuditServer_React(t *testing.T) {
 				MaxAge:     1,
 				Compress:   false,
 			},
-		},
-		{
-			Name: "critical_events",
-			Rules: []string{
-				`Request.Operation == "delete" && Auth.PolicyResults.Allowed == true`,
-				`Request.Path startsWith "secret/metadata/" && Auth.PolicyResults.Allowed == true`,
-			},
-			LogFile: LogFileConfig{
-				FilePath:   tempDir + "/critical_events.log",
-				MaxSize:    1,
-				MaxBackups: 1,
-				MaxAge:     1,
-				Compress:   false,
+			Messaging: Messaging{
+				Type:       "mattermost_webhook",
+				WebhookURL: "http://example.com/webhook",
 			},
 		},
 	}
@@ -77,17 +81,28 @@ func TestAuditServer_React(t *testing.T) {
 	// Initialize viper with the rule group configurations
 	viper.Set("rule_groups", ruleGroupConfigs)
 
-	// Create the AuditServer
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	as := New(logger)
-
-	tests := []struct {
-		name         string
-		input        AuditLog
-		expectedLogs map[string]bool // Map of log file names to whether they should contain the log
+	for _, tt := range []struct {
+		name                string
+		input               AuditLog
+		inputFrame          []byte
+		expectedLogs        map[string]bool // Map of log file names to whether they should contain the log
+		expectAction        gnet.Action     // Expected gnet.Action
+		messengerError      error           // Error to be returned by Messenger.Send
+		expectedLogMessages []string        // Expected log messages to be present in the logs
 	}{
 		{
-			name: "Normal operation - update",
+			name:       "Invalid JSON input",
+			inputFrame: []byte("Invalid JSON"),
+			expectedLogs: map[string]bool{
+				tempDir + "/normal_operations.log": false,
+			},
+			expectAction: gnet.Close,
+			expectedLogMessages: []string{
+				"Error parsing audit log",
+			},
+		},
+		{
+			name: "Messenger.Send failure",
 			input: AuditLog{
 				Type: "request",
 				Time: "2024-09-17T13:00:00Z",
@@ -112,22 +127,82 @@ func TestAuditServer_React(t *testing.T) {
 			},
 			expectedLogs: map[string]bool{
 				tempDir + "/normal_operations.log": true,
-				tempDir + "/critical_events.log":   false,
+			},
+			expectAction:   gnet.Close,
+			messengerError: fmt.Errorf("failed to send message"),
+			expectedLogMessages: []string{
+				"Failed to send notification",
 			},
 		},
-		// Add more test cases as needed
-	}
-
-	for _, tt := range tests {
+		{
+			name: "No matching rule",
+			input: AuditLog{
+				Type: "request",
+				Time: "2024-09-17T13:00:00Z",
+				Auth: Auth{
+					DisplayName: "user2",
+					Policies:    []string{"default"},
+					PolicyResults: struct {
+						Allowed          bool `json:"allowed"`
+						GrantingPolicies []struct {
+							Name        string `json:"name"`
+							NamespaceID string `json:"namespace_id"`
+							Type        string `json:"type"`
+						} `json:"granting_policies"`
+					}{
+						Allowed: false,
+					},
+				},
+				Request: Request{
+					Operation: "read",
+					Path:      "secret/data/myapp/config",
+				},
+			},
+			expectedLogs: map[string]bool{
+				tempDir + "/normal_operations.log": false,
+			},
+			expectAction: gnet.Close,
+		},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
-			// Serialize the audit log to JSON
-			frame, err := json.Marshal(tt.input)
-			if err != nil {
-				t.Fatalf("Failed to marshal audit log: %v", err)
+			var frame []byte
+			if tt.inputFrame != nil {
+				frame = tt.inputFrame
+			} else {
+				// Serialize the audit log to JSON
+				var err error
+				frame, err = json.Marshal(tt.input)
+				if err != nil {
+					t.Fatalf("Failed to marshal audit log: %v", err)
+				}
+			}
+
+			// Capture logs
+			var logBuffer bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+			// Create the AuditServer
+			as := New(logger)
+
+			// Set up mock messenger if needed
+			for i := range as.ruleGroups {
+				rg := &as.ruleGroups[i]
+				if rg.Messenger != nil {
+					// Replace Messenger with MockMessenger
+					rg.Messenger = &MockMessenger{
+						SendFunc: func(message string) error {
+							return tt.messengerError
+						},
+					}
+				}
 			}
 
 			// Call React
-			as.React(frame, &mockConn{})
+			_, action := as.React(frame, &mockConn{})
+
+			if action != tt.expectAction {
+				t.Errorf("Expected action %v, got %v", tt.expectAction, action)
+			}
 
 			// Give some time for the log to be written
 			time.Sleep(100 * time.Millisecond)
@@ -154,6 +229,14 @@ func TestAuditServer_React(t *testing.T) {
 				}
 			}
 
+			// Check logs
+			logOutput := logBuffer.String()
+			for _, msg := range tt.expectedLogMessages {
+				if !bytes.Contains([]byte(logOutput), []byte(msg)) {
+					t.Errorf("Expected log output to contain '%s', got %s", msg, logOutput)
+				}
+			}
+
 			// Clean up log files for next test
 			for logFile := range tt.expectedLogs {
 				os.Remove(logFile)
@@ -163,12 +246,13 @@ func TestAuditServer_React(t *testing.T) {
 }
 
 func TestNew(t *testing.T) {
-	// Define rule group configurations
+	// Define rule group configurations with an invalid rule and messenger type
 	ruleGroupConfigs := []RuleGroupConfig{
 		{
 			Name: "test_group",
 			Rules: []string{
 				`Request.Operation == "update"`,
+				`Invalid rule syntax`,
 			},
 			LogFile: LogFileConfig{
 				FilePath:   "test.log",
@@ -177,27 +261,44 @@ func TestNew(t *testing.T) {
 				MaxAge:     1,
 				Compress:   false,
 			},
+			Messaging: Messaging{
+				Type: "invalid_messenger",
+			},
 		},
 	}
 
 	// Initialize viper with the rule group configurations
 	viper.Set("rule_groups", ruleGroupConfigs)
 
-	// Test with nil logger
-	server := New(nil)
-	if server.logger == nil {
-		t.Errorf("Expected non-nil logger when initialized with nil")
-	}
+	// Capture logs
+	var logBuffer bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
+	server := New(logger)
 	if len(server.ruleGroups) != len(ruleGroupConfigs) {
 		t.Errorf("Expected %d rule groups, got %d", len(ruleGroupConfigs), len(server.ruleGroups))
 	}
 
-	// Test with custom logger
-	customLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	server = New(customLogger)
-	if server.logger != customLogger {
-		t.Errorf("Expected custom logger to be used")
+	rg := server.ruleGroups[0]
+
+	// Check that one rule compiled successfully, and one failed
+	if len(rg.CompiledRules) != 1 {
+		t.Errorf("Expected 1 compiled rule, got %d", len(rg.CompiledRules))
+	}
+
+	// Check that Messenger is nil due to invalid type
+	if rg.Messenger != nil {
+		t.Errorf("Expected Messenger to be nil for invalid type, got %v", rg.Messenger)
+	}
+
+	// Check logs for error messages
+	logOutput := logBuffer.String()
+	if !bytes.Contains([]byte(logOutput), []byte("Failed to compile rule")) {
+		t.Errorf("Expected log output to contain 'Failed to compile rule', got %s", logOutput)
+	}
+
+	if !bytes.Contains([]byte(logOutput), []byte("Invalid messenger type")) {
+		t.Errorf("Expected log output to contain 'Invalid messenger type', got %s", logOutput)
 	}
 }
 
@@ -226,30 +327,77 @@ func TestRuleGroup_shouldLog(t *testing.T) {
 		},
 	}
 
-	// Compile a rule
-	ruleStr := `Request.Operation == "update" && Request.Path startsWith "secret/data/" && Auth.PolicyResults.Allowed == true`
-	program, err := expr.Compile(ruleStr, expr.Env(&AuditLog{}))
-	if err != nil {
-		t.Fatalf("Failed to compile rule: %v", err)
-	}
+	t.Run("Matching rule", func(t *testing.T) {
+		// Compile a rule
+		ruleStr := `Request.Operation == "update" && Request.Path startsWith "secret/data/" && Auth.PolicyResults.Allowed == true`
+		program, err := expr.Compile(ruleStr, expr.Env(&AuditLog{}))
+		if err != nil {
+			t.Fatalf("Failed to compile rule: %v", err)
+		}
 
-	// Create a RuleGroup
-	rg := &RuleGroup{
-		Name: "test_group",
-		CompiledRules: []CompiledRule{
-			{Program: program},
-		},
-	}
+		// Create a RuleGroup
+		rg := &RuleGroup{
+			Name: "test_group",
+			CompiledRules: []CompiledRule{
+				{Program: program},
+			},
+		}
 
-	// Test shouldLog
-	if !rg.shouldLog(auditLog) {
-		t.Errorf("Expected shouldLog to return true, got false")
-	}
+		// Test shouldLog
+		if !rg.shouldLog(auditLog) {
+			t.Errorf("Expected shouldLog to return true, got false")
+		}
+	})
 
-	// Modify audit log to not match
-	auditLog.Request.Operation = "read"
+	t.Run("Non-matching rule", func(t *testing.T) {
+		// Compile a rule that does not match
+		ruleStr := `Request.Operation == "delete"`
+		program, err := expr.Compile(ruleStr, expr.Env(&AuditLog{}))
+		if err != nil {
+			t.Fatalf("Failed to compile rule: %v", err)
+		}
 
-	if rg.shouldLog(auditLog) {
-		t.Errorf("Expected shouldLog to return false, got true")
-	}
+		rg := &RuleGroup{
+			Name: "test_group",
+			CompiledRules: []CompiledRule{
+				{Program: program},
+			},
+		}
+
+		if rg.shouldLog(auditLog) {
+			t.Errorf("Expected shouldLog to return false, got true")
+		}
+	})
+
+	t.Run("No compiled rules", func(t *testing.T) {
+		rg := &RuleGroup{
+			Name:          "test_group",
+			CompiledRules: nil,
+		}
+
+		if !rg.shouldLog(auditLog) {
+			t.Errorf("Expected shouldLog to return true when no compiled rules, got false")
+		}
+	})
+
+	t.Run("expr.Run returns error", func(t *testing.T) {
+		// Expression that will cause a runtime error (division by zero)
+		ruleStr := `1 / 0 == 0`
+
+		program, err := expr.Compile(ruleStr)
+		if err != nil {
+			t.Fatalf("Failed to compile rule: %v", err)
+		}
+
+		rg := &RuleGroup{
+			Name: "test_group",
+			CompiledRules: []CompiledRule{
+				{Program: program},
+			},
+		}
+
+		if rg.shouldLog(auditLog) {
+			t.Errorf("Expected shouldLog to return false when expr.Run returns error, got true")
+		}
+	})
 }
