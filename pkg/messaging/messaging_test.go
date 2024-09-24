@@ -21,6 +21,35 @@ func (m *MockClient) CreatePost(post *model.Post) (*model.Post, *model.Response,
 	return args.Get(0).(*model.Post), args.Get(1).(*model.Response), args.Error(2)
 }
 
+func TestNewMattermostMessenger(t *testing.T) {
+	serverURL := "https://mattermost.example.com"
+	token := "test-token"
+	channel := "test-channel"
+
+	messenger := NewMattermostMessenger(serverURL, token, channel)
+
+	assert.NotNil(t, messenger, "NewMattermostMessenger should return a non-nil messenger")
+	assert.Equal(t, channel, messenger.channel, "Channel should be set correctly")
+
+	// Check if the client is set and configured correctly
+	client, ok := messenger.client.(*model.Client4)
+	assert.True(t, ok, "Client should be of type *model.Client4")
+	assert.Equal(t, serverURL, client.URL, "Server URL should be set correctly")
+
+	// We can't directly check the token as it's not exposed, but we can verify it's not empty
+	assert.NotEmpty(t, client.AuthToken, "Auth token should be set")
+
+	// Test with empty values
+	emptyMessenger := NewMattermostMessenger("", "", "")
+	assert.NotNil(t, emptyMessenger, "NewMattermostMessenger should return a non-nil messenger even with empty inputs")
+	assert.Empty(t, emptyMessenger.channel, "Channel should be empty")
+
+	emptyClient, ok := emptyMessenger.client.(*model.Client4)
+	assert.True(t, ok, "Client should be of type *model.Client4")
+	assert.Empty(t, emptyClient.URL, "Server URL should be empty")
+	assert.Empty(t, emptyClient.AuthToken, "Auth token should be empty")
+}
+
 func TestMattermostMessenger_Send(t *testing.T) {
 	mockClient := new(MockClient)
 	messenger := &MattermostMessenger{
