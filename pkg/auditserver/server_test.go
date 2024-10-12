@@ -328,6 +328,33 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestNewWithoutLogger(t *testing.T) {
+	// Redirect stdout to capture log output
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	server := New(nil)
+
+	assert.NotNil(t, server)
+	assert.NotNil(t, server.logger)
+
+	// Test logging
+	server.logger.Info("Test log message")
+
+	// Restore stdout
+	w.Close()
+	os.Stdout = oldStdout
+
+	// Read captured output
+	out, _ := ioutil.ReadAll(r)
+	var logEntry map[string]interface{}
+	err := json.Unmarshal(out, &logEntry)
+	assert.NoError(t, err)
+	assert.Equal(t, "Test log message", logEntry["msg"])
+	assert.Equal(t, "INFO", logEntry["level"])
+}
+
 func TestRuleGroup_shouldLog(t *testing.T) {
 	// Define a sample audit log
 	auditLog := &AuditLog{
