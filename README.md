@@ -32,7 +32,7 @@ These instructions will help you set up and run `vault-audit-filter` on your loc
 
 ### Prerequisites
 
-- **Go**: Ensure you have Go 1.21 or later installed. You can download it here: <https://golang.org/dl/>
+- **Go**: Ensure you have Go 1.22.3 or later installed. You can download it here: <https://golang.org/dl/>
 - **Vault**: You should have HashiCorp Vault installed and configured. Instructions can be found here: <https://www.vaultproject.io/docs/install>
 
 ### Installation
