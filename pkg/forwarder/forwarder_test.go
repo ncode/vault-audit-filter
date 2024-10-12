@@ -60,6 +60,40 @@ func TestForwarderInterface(t *testing.T) {
 	var _ Forwarder = (*UDPForwarder)(nil)
 }
 
+func TestNewUDPForwarder_Failure(t *testing.T) {
+	// Attempt to create a new UDPForwarder with an invalid address
+	_, err := NewUDPForwarder("256.0.0.1:12345") // Invalid IP address
+
+	// Check that the error is not nil
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no such host")
+
+	// Attempt to create a new UDPForwarder with a valid but unreachable address
+	_, err = NewUDPForwarder("203.0.113.1:12345") // TEST-NET-3 address, should be unreachable
+
+	// This should not return an error for UDP, as it's connectionless
+	assert.NoError(t, err)
+
+	// Attempt to create a new UDPForwarder with a port that's out of range
+	_, err = NewUDPForwarder("127.0.0.1:70000") // Port number out of range
+
+	// Check that the error is not nil
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid port")
+}
+
+func TestUDPForwarder_ForwardToUnreachableAddress(t *testing.T) {
+	// Create a new UDPForwarder with a valid but unreachable address
+	forwarder, err := NewUDPForwarder("203.0.113.1:12345") // TEST-NET-3 address, should be unreachable
+	assert.NoError(t, err)
+
+	// Attempt to forward a message
+	err = forwarder.Forward([]byte("test message"))
+
+	// This should not return an error for UDP, as it's connectionless
+	assert.NoError(t, err)
+}
+
 func TestUDPForwarder_ConcurrentForwarding(t *testing.T) {
 	// Start a mock UDP server
 	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
