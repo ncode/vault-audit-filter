@@ -20,3 +20,6 @@ rule_groups:
       max_backups: 5
       max_age: 30
       compress: true
+    forwarding:
+      enabled: true
+      address: "udp_receiver:9001"
