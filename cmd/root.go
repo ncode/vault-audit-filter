@@ -104,11 +104,6 @@ func initConfig() {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	}
 
-	if viper.GetString("vault.token") == "" {
-		logger.Error("vault.token is required")
-		os.Exit(1)
-	}
-
 	if !viper.IsSet("rule_groups") || len(viper.GetStringSlice("rule_groups")) == 0 {
 		logger.Info("No rules defined in configuration; all audit logs will be printed")
 	}
