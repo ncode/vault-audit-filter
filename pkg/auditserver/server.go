@@ -2,6 +2,7 @@ package auditserver
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
@@ -180,7 +181,7 @@ func (rg *RuleGroup) shouldLog(auditLog *AuditLog) bool {
 	return false
 }
 
-func New(logger *slog.Logger) *AuditServer {
+func New(logger *slog.Logger) (*AuditServer, error) {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
@@ -189,6 +190,7 @@ func New(logger *slog.Logger) *AuditServer {
 	var ruleGroupConfigs []RuleGroupConfig
 	if err := viper.UnmarshalKey("rule_groups", &ruleGroupConfigs); err != nil {
 		logger.Error("Failed to load rule groups", "error", err)
+		return nil, fmt.Errorf("failed to load rule groups: %w", err)
 	}
 
 	var ruleGroups []RuleGroup
@@ -233,9 +235,8 @@ func New(logger *slog.Logger) *AuditServer {
 			var err error
 			fwd, err = forwarder.NewUDPForwarder(rgConfig.Forwarding.Address)
 			if err != nil {
-				logger.Error("Failed to create UDP connection for forwarding", "error", err)
+				logger.Error("Failed to create UDP forwarder", "error", err)
 			}
-
 		}
 
 		ruleGroup := RuleGroup{
@@ -251,5 +252,5 @@ func New(logger *slog.Logger) *AuditServer {
 	return &AuditServer{
 		logger:     logger,
 		ruleGroups: ruleGroups,
-	}
+	}, nil
 }

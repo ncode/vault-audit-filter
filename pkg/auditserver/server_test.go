@@ -210,7 +210,7 @@ func TestAuditServer_React(t *testing.T) {
 			logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 			// Create the AuditServer
-			as := New(logger)
+			as, _ := New(logger)
 
 			// Set up mock messenger if needed
 			for i := range as.ruleGroups {
@@ -302,7 +302,7 @@ func TestNew(t *testing.T) {
 	var logBuffer bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	server := New(logger)
+	server, _ := New(logger)
 	if len(server.ruleGroups) != len(ruleGroupConfigs) {
 		t.Errorf("Expected %d rule groups, got %d", len(ruleGroupConfigs), len(server.ruleGroups))
 	}
@@ -336,7 +336,7 @@ func TestNewWithoutLogger(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	server := New(nil)
+	server, _ := New(nil)
 
 	assert.NotNil(t, server)
 	assert.NotNil(t, server.logger)
@@ -359,6 +359,57 @@ func TestNewWithoutLogger(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "Test log message", lastLogEntry["msg"])
 	assert.Equal(t, "INFO", lastLogEntry["level"])
+}
+
+func TestNew_WithRuleGroups(t *testing.T) {
+	// Set up a mock configuration
+	viper.Reset()
+	viper.Set("rule_groups", []map[string]interface{}{
+		{
+			"name": "test_group",
+			"rules": []string{
+				"Request.Operation == 'read'",
+			},
+			"log_file": map[string]interface{}{
+				"file_path": "/tmp/test.log",
+				"max_size":  10,
+			},
+			"forwarding": map[string]interface{}{
+				"enabled": true,
+				"address": "127.0.0.1:9000",
+			},
+		},
+	})
+
+	server, err := New(nil)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, server)
+	assert.Len(t, server.ruleGroups, 1)
+	assert.Equal(t, "test_group", server.ruleGroups[0].Name)
+	assert.Len(t, server.ruleGroups[0].CompiledRules, 1)
+	assert.NotNil(t, server.ruleGroups[0].Logger)
+	assert.NotNil(t, server.ruleGroups[0].Forwarder)
+}
+
+func TestNew_WithInvalidRuleGroups(t *testing.T) {
+	// Set up an invalid configuration
+	viper.Reset()
+	viper.Set("rule_groups", "invalid_value")
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	server, err := New(logger)
+
+	assert.Error(t, err)
+	assert.Nil(t, server)
+	assert.Contains(t, err.Error(), "failed to load rule groups")
+
+	// Verify error was logged
+	logOutput := buf.String()
+	assert.Contains(t, logOutput, "Failed to load rule groups")
+	assert.Contains(t, logOutput, "ERROR")
 }
 
 func TestRuleGroup_shouldLog(t *testing.T) {
@@ -596,7 +647,7 @@ func TestAuditServer_React_WithForwarding(t *testing.T) {
 
 			// Create the AuditServer
 			logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-			as := New(logger)
+			as, _ := New(logger)
 
 			// Replace the forwarders with our mocks
 			as.ruleGroups[0].Forwarder = mockForwarder1
