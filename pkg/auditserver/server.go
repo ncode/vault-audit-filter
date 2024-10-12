@@ -236,6 +236,7 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 			fwd, err = forwarder.NewUDPForwarder(rgConfig.Forwarding.Address)
 			if err != nil {
 				logger.Error("Failed to create UDP forwarder", "error", err)
+				return nil, fmt.Errorf("failed to create UDP forwarder: %w", err)
 			}
 		}
 
