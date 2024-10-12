@@ -42,3 +42,11 @@ services:
       - IPC_LOCK
     entrypoint: "/scripts/writer.sh"
 
+  udp_receiver:
+    image: oraclelinux:9
+    container_name: udp_receiver
+    volumes:
+      - ./scripts:/scripts:ro
+    entrypoint: "/scripts/udp-receiver.sh"
+    ports:
+      - "9001:9001/udp"

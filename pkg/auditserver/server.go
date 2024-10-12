@@ -2,15 +2,19 @@ package auditserver
 
 import (
 	"encoding/json"
-	"github.com/expr-lang/expr"
-	"github.com/expr-lang/expr/vm"
-	"github.com/panjf2000/gnet"
-	"github.com/spf13/viper"
-	"gopkg.in/natefinch/lumberjack.v2"
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
 	"time"
+
+	"github.com/expr-lang/expr"
+	"github.com/expr-lang/expr/vm"
+	"github.com/ncode/vault-audit-filter/pkg/forwarder"
+	"github.com/ncode/vault-audit-filter/pkg/messaging"
+	"github.com/panjf2000/gnet"
+	"github.com/spf13/viper"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 type Request struct {
@@ -82,12 +86,29 @@ type RuleGroup struct {
 	Name          string
 	CompiledRules []CompiledRule
 	Logger        *log.Logger
+	Messenger     messaging.Messenger
+	Forwarder     forwarder.Forwarder
+}
+
+type Messaging struct {
+	Type       string `mapstructure:"type"`
+	Token      string `mapstructure:"token"`
+	Channel    string `mapstructure:"channel"`
+	URL        string `mapstructure:"url"`
+	WebhookURL string `mapstructure:"webhook_url"`
+}
+
+type ForwardingConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Address string `mapstructure:"address"`
 }
 
 type RuleGroupConfig struct {
-	Name    string        `mapstructure:"name"`
-	Rules   []string      `mapstructure:"rules"`
-	LogFile LogFileConfig `mapstructure:"log_file"`
+	Name       string           `mapstructure:"name"`
+	Rules      []string         `mapstructure:"rules"`
+	LogFile    LogFileConfig    `mapstructure:"log_file"`
+	Messaging  Messaging        `mapstructure:"messaging"`
+	Forwarding ForwardingConfig `mapstructure:"forwarding"`
 }
 
 type LogFileConfig struct {
@@ -117,7 +138,21 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 	// Check each rule group
 	for _, rg := range as.ruleGroups {
 		if rg.shouldLog(&auditLog) {
-			as.logger.Info("Matched rule group", "group", rg.Name)
+			as.logger.Debug("Matched rule group", "group", rg.Name)
+
+			// Send notification if messenger is configured
+			if rg.Messenger != nil {
+				if err := rg.Messenger.Send(string(frame)); err != nil {
+					as.logger.Error("Failed to send notification", "error", err)
+				}
+			}
+
+			if rg.Forwarder != nil {
+				if err := rg.Forwarder.Forward(frame); err != nil {
+					as.logger.Error("Failed to forward message", "error", err)
+				}
+			}
+
 			// Write the raw frame directly to the group's log file
 			rg.Logger.Print(string(frame))
 			// Uncomment the following line to prevent logging to multiple groups
@@ -146,7 +181,7 @@ func (rg *RuleGroup) shouldLog(auditLog *AuditLog) bool {
 	return false
 }
 
-func New(logger *slog.Logger) *AuditServer {
+func New(logger *slog.Logger) (*AuditServer, error) {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
@@ -155,6 +190,7 @@ func New(logger *slog.Logger) *AuditServer {
 	var ruleGroupConfigs []RuleGroupConfig
 	if err := viper.UnmarshalKey("rule_groups", &ruleGroupConfigs); err != nil {
 		logger.Error("Failed to load rule groups", "error", err)
+		return nil, fmt.Errorf("failed to load rule groups: %w", err)
 	}
 
 	var ruleGroups []RuleGroup
@@ -181,11 +217,35 @@ func New(logger *slog.Logger) *AuditServer {
 		}
 		groupLogger := log.New(logFile, "", 0)
 
-		// Create RuleGroup
+		// Configure messenger
+		var messenger messaging.Messenger
+		switch rgConfig.Messaging.Type {
+		case "mattermost":
+			messenger = messaging.NewMattermostMessenger(rgConfig.Messaging.URL, rgConfig.Messaging.Token, rgConfig.Messaging.Channel)
+		case "mattermost_webhook":
+			messenger = messaging.NewMattermostWebhookMessenger(rgConfig.Messaging.WebhookURL)
+		default:
+			if rgConfig.Messaging.Type != "" {
+				logger.Error("Invalid messenger type", "type", rgConfig.Messaging.Type)
+			}
+		}
+
+		var fwd forwarder.Forwarder
+		if rgConfig.Forwarding.Enabled {
+			var err error
+			fwd, err = forwarder.NewUDPForwarder(rgConfig.Forwarding.Address)
+			if err != nil {
+				logger.Error("Failed to create UDP forwarder", "error", err)
+				return nil, fmt.Errorf("failed to create UDP forwarder: %w", err)
+			}
+		}
+
 		ruleGroup := RuleGroup{
 			Name:          rgConfig.Name,
 			CompiledRules: compiledRules,
 			Logger:        groupLogger,
+			Messenger:     messenger,
+			Forwarder:     fwd,
 		}
 		ruleGroups = append(ruleGroups, ruleGroup)
 	}
@@ -193,5 +253,5 @@ func New(logger *slog.Logger) *AuditServer {
 	return &AuditServer{
 		logger:     logger,
 		ruleGroups: ruleGroups,
-	}
+	}, nil
 }

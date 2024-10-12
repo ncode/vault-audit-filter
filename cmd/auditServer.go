@@ -17,10 +17,11 @@ package cmd
 
 import (
 	"fmt"
+	"log"
+
 	"github.com/ncode/vault-audit-filter/pkg/auditserver"
 	"github.com/panjf2000/gnet"
 	"github.com/spf13/viper"
-	"log"
 
 	"github.com/spf13/cobra"
 )
@@ -37,7 +38,10 @@ This application is a tool to generate the needed files
 to quickly create a Cobra application.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		addr := fmt.Sprintf("udp://%s", viper.GetString("vault.audit_address"))
-		server := auditserver.New(nil)
+		server, err := auditserver.New(nil)
+		if err != nil {
+			logger.Error(err.Error())
+		}
 		log.Fatal(gnet.Serve(server, addr, gnet.WithMulticore(true)))
 	},
 }

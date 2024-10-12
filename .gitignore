@@ -27,6 +27,8 @@ go.work.sum
 # idea
 .idea
 
-# ignore the log directory
+# .DS_Store
+.DS_Store
 
+# ignore the log directory
 configs/development/logs/

@@ -29,6 +29,11 @@ var setupCmd = &cobra.Command{
 	Short: "Setup vault audit device",
 	Long:  ``,
 	Run: func(cmd *cobra.Command, args []string) {
+		if viper.GetString("vault.token") == "" {
+			logger.Error("vault.token is required")
+			os.Exit(1)
+		}
+
 		client, err := vault.NewVaultClient(viper.GetString("vault.address"), vault.TokenAuth{Token: viper.GetString("vault.token")})
 		if err != nil {
 			logger.Error("setup", "unable to setup vault client", err.Error())

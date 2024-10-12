@@ -13,6 +13,8 @@
 - **Dynamic Logging**: Log audit events to specified files with log rotation and size limits.
 - **Supports Multiple Operations**: Filters common Vault operations, including KV operations, metadata updates, and deletion events.
 - **Performance-Oriented**: Built with `gnet` to handle high concurrency.
+- **Flexible Forwarding**: Forward filtered audit logs to specified UDP addresses for further processing or monitoring.
+- **Messaging Integration**: Send notifications about matched audit logs to messaging platforms like Mattermost.
 
 ## Table of Contents
 
@@ -30,7 +32,7 @@ These instructions will help you set up and run `vault-audit-filter` on your loc
 
 ### Prerequisites
 
-- **Go**: Ensure you have Go 1.21 or later installed. You can download it here: <https://golang.org/dl/>
+- **Go**: Ensure you have Go 1.22.3 or later installed. You can download it here: <https://golang.org/dl/>
 - **Vault**: You should have HashiCorp Vault installed and configured. Instructions can be found here: <https://www.vaultproject.io/docs/install>
 
 ### Installation
@@ -54,7 +56,7 @@ Once you have built the project, you can run the `vault-audit-filter` executable
 
 ## Configuration
 
-`vault-audit-filter` uses a YAML-based configuration file that allows you to define rule groups, specify logging files, and configure Vault settings.
+`vault-audit-filter` uses a YAML-based configuration file that allows you to define rule groups, specify logging files, configure Vault settings, set up forwarding options, and configure messaging integration.
 
 ### Sample Configuration (`config.yaml`)
 
@@ -75,6 +77,12 @@ Once you have built the project, you can run the `vault-audit-filter` executable
           max_backups: 5     # Max number of backup files
           max_age: 30        # Max age in days
           compress: true     # Compress rotated files
+        forwarding:
+          enabled: true
+          address: "127.0.0.1:9001"
+        messaging:
+          type: "mattermost_webhook"
+          webhook_url: "https://your-mattermost-instance.com/hooks/your-webhook-id"
 
       - name: "critical_events"
         rules:
@@ -86,6 +94,14 @@ Once you have built the project, you can run the `vault-audit-filter` executable
           max_backups: 5
           max_age: 30
           compress: true
+        forwarding:
+          enabled: true
+          address: "127.0.0.1:9002"
+        messaging:
+          type: "mattermost"
+          url: "https://your-mattermost-instance.com"
+          token: "your-bot-token"
+          channel: "your-channel-id"
 
 ### Configuration Parameters
 
@@ -104,6 +120,13 @@ Once you have built the project, you can run the `vault-audit-filter` executable
   - `log_file.max_backups`: The number of backup logs to keep.
   - `log_file.max_age`: The maximum number of days to retain logs.
   - `log_file.compress`: Whether to compress the old log files.
+  - `forwarding.enabled`: Whether to enable forwarding for this rule group.
+  - `forwarding.address`: The UDP address to forward matching audit logs to.
+  - `messaging.type`: The type of messaging integration ("mattermost" or "mattermost_webhook").
+  - `messaging.webhook_url`: The webhook URL for Mattermost (when using "mattermost_webhook" type).
+  - `messaging.url`: The Mattermost server URL (when using "mattermost" type).
+  - `messaging.token`: The bot token for Mattermost (when using "mattermost" type).
+  - `messaging.channel`: The channel ID for Mattermost messages (when using "mattermost" type).
 
 ### Rule Syntax
 
@@ -139,6 +162,33 @@ $ export VAULT_ADDRESS="http://127.0.0.1:8200"
 $ export VAULT_TOKEN="your-vault-token"
 ```
 
+## Testing
+
+To run the test suite for `vault-audit-filter`, use the following command:
+
+```bash
+go test -v ./...
+```
+
+For running tests with race condition detection:
+
+```bash
+go test -race -v ./...
+```
+
+To run a specific test, such as the concurrent forwarding test:
+
+```bash
+go test -v -run TestUDPForwarder_ConcurrentForwarding ./pkg/forwarder
+```
+
+To generate a test coverage report:
+
+```bash
+go test -v -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out
+```
+
 ### Development
 
 For development purposes, you can use the provided Makefile located at `configs/development/Makefile` to build and run the project using Docker and Docker Compose. This is how I test my changes and have a playground of sorts.
@@ -151,6 +201,7 @@ Before submitting a pull request, ensure that:
 - The code compiles without errors.
 - All tests pass.
 - Your changes are well-documented.
+- You've added or updated tests to cover your changes.
 
 ## License
 
