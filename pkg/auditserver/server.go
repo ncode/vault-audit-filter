@@ -3,16 +3,17 @@ package auditserver
 import (
 	"encoding/json"
 	"fmt"
+	"log"
+	"log/slog"
+	"os"
+	"time"
+
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
 	"github.com/ncode/vault-audit-filter/pkg/messaging"
 	"github.com/panjf2000/gnet"
 	"github.com/spf13/viper"
 	"gopkg.in/natefinch/lumberjack.v2"
-	"log"
-	"log/slog"
-	"os"
-	"time"
 )
 
 type Request struct {
@@ -137,7 +138,7 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 				}
 			}
 
-			as.logger.Info("Matched rule group", "group", rg.Name)
+			as.logger.Debug("Matched rule group", "group", rg.Name)
 			// Write the raw frame directly to the group's log file
 			rg.Logger.Print(string(frame))
 			// Uncomment the following line to prevent logging to multiple groups
