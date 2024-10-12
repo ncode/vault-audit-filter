@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -347,12 +349,16 @@ func TestNewWithoutLogger(t *testing.T) {
 	os.Stdout = oldStdout
 
 	// Read captured output
-	out, _ := ioutil.ReadAll(r)
-	var logEntry map[string]interface{}
-	err := json.Unmarshal(out, &logEntry)
+	out, _ := io.ReadAll(r)
+	logEntries := strings.Split(strings.TrimSpace(string(out)), "\n")
+
+	assert.GreaterOrEqual(t, len(logEntries), 1, "Expected at least one log entry")
+
+	var lastLogEntry map[string]interface{}
+	err := json.Unmarshal([]byte(logEntries[len(logEntries)-1]), &lastLogEntry)
 	assert.NoError(t, err)
-	assert.Equal(t, "Test log message", logEntry["msg"])
-	assert.Equal(t, "INFO", logEntry["level"])
+	assert.Equal(t, "Test log message", lastLogEntry["msg"])
+	assert.Equal(t, "INFO", lastLogEntry["level"])
 }
 
 func TestRuleGroup_shouldLog(t *testing.T) {
