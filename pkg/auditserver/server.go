@@ -2,7 +2,6 @@ package auditserver
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"log/slog"
 	"os"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/expr-lang/expr"
 	"github.com/expr-lang/expr/vm"
+	"github.com/ncode/vault-audit-filter/pkg/forwarder"
 	"github.com/ncode/vault-audit-filter/pkg/messaging"
 	"github.com/panjf2000/gnet"
 	"github.com/spf13/viper"
@@ -86,6 +86,7 @@ type RuleGroup struct {
 	CompiledRules []CompiledRule
 	Logger        *log.Logger
 	Messenger     messaging.Messenger
+	Forwarder     forwarder.Forwarder
 }
 
 type Messaging struct {
@@ -96,11 +97,17 @@ type Messaging struct {
 	WebhookURL string `mapstructure:"webhook_url"`
 }
 
+type ForwardingConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Address string `mapstructure:"address"`
+}
+
 type RuleGroupConfig struct {
-	Name      string        `mapstructure:"name"`
-	Rules     []string      `mapstructure:"rules"`
-	LogFile   LogFileConfig `mapstructure:"log_file"`
-	Messaging Messaging     `mapstructure:"messaging"`
+	Name       string           `mapstructure:"name"`
+	Rules      []string         `mapstructure:"rules"`
+	LogFile    LogFileConfig    `mapstructure:"log_file"`
+	Messaging  Messaging        `mapstructure:"messaging"`
+	Forwarding ForwardingConfig `mapstructure:"forwarding"`
 }
 
 type LogFileConfig struct {
@@ -130,15 +137,21 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 	// Check each rule group
 	for _, rg := range as.ruleGroups {
 		if rg.shouldLog(&auditLog) {
+			as.logger.Debug("Matched rule group", "group", rg.Name)
+
 			// Send notification if messenger is configured
 			if rg.Messenger != nil {
-				message := fmt.Sprintf("Matched rule group: %s\nAudit log: %s", rg.Name, string(frame))
-				if err := rg.Messenger.Send(message); err != nil {
+				if err := rg.Messenger.Send(string(frame)); err != nil {
 					as.logger.Error("Failed to send notification", "error", err)
 				}
 			}
 
-			as.logger.Debug("Matched rule group", "group", rg.Name)
+			if rg.Forwarder != nil {
+				if err := rg.Forwarder.Forward(frame); err != nil {
+					as.logger.Error("Failed to forward message", "error", err)
+				}
+			}
+
 			// Write the raw frame directly to the group's log file
 			rg.Logger.Print(string(frame))
 			// Uncomment the following line to prevent logging to multiple groups
@@ -215,12 +228,22 @@ func New(logger *slog.Logger) *AuditServer {
 			}
 		}
 
-		// Create RuleGroup
+		var fwd forwarder.Forwarder
+		if rgConfig.Forwarding.Enabled {
+			var err error
+			fwd, err = forwarder.NewUDPForwarder(rgConfig.Forwarding.Address)
+			if err != nil {
+				logger.Error("Failed to create UDP connection for forwarding", "error", err)
+			}
+
+		}
+
 		ruleGroup := RuleGroup{
 			Name:          rgConfig.Name,
 			CompiledRules: compiledRules,
 			Logger:        groupLogger,
 			Messenger:     messenger,
+			Forwarder:     fwd,
 		}
 		ruleGroups = append(ruleGroups, ruleGroup)
 	}

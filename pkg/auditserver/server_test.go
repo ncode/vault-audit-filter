@@ -6,15 +6,41 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
+
+	"log/slog"
 
 	"github.com/expr-lang/expr"
 	"github.com/panjf2000/gnet"
 	"github.com/spf13/viper"
-	"log/slog"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 )
+
+type MockForwarder struct {
+	mock.Mock
+	forwardedData []byte
+	mu            sync.Mutex
+}
+
+func (m *MockForwarder) Forward(data []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.forwardedData = append(m.forwardedData, data...)
+	args := m.Called(data)
+	return args.Error(0)
+}
+
+func (m *MockForwarder) GetForwardedData() []byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.forwardedData
+}
 
 // MockMessenger is a mock implementation of the Messenger interface
 type MockMessenger struct {
@@ -400,4 +426,201 @@ func TestRuleGroup_shouldLog(t *testing.T) {
 			t.Errorf("Expected shouldLog to return false when expr.Run returns error, got true")
 		}
 	})
+}
+
+func TestAuditServer_React_WithForwarding(t *testing.T) {
+	// Create a temporary directory for log files
+	tempDir := t.TempDir()
+
+	// Create a mock HTTP server for webhook
+	mockWebhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockWebhook.Close()
+
+	// Define rule group configurations with forwarding
+	ruleGroupConfigs := []RuleGroupConfig{
+		{
+			Name: "normal_operations",
+			Rules: []string{
+				`Request.Operation in ["read", "update"] && Request.Path startsWith "secret/data/" && Auth.PolicyResults.Allowed == true`,
+			},
+			LogFile: LogFileConfig{
+				FilePath:   tempDir + "/normal_operations.log",
+				MaxSize:    1,
+				MaxBackups: 1,
+				MaxAge:     1,
+				Compress:   false,
+			},
+			Messaging: Messaging{
+				Type:       "mattermost_webhook",
+				WebhookURL: mockWebhook.URL,
+			},
+			Forwarding: ForwardingConfig{
+				Enabled: true,
+				Address: "127.0.0.1:9001",
+			},
+		},
+		{
+			Name: "critical_events",
+			Rules: []string{
+				`Request.Operation == "delete" && Auth.PolicyResults.Allowed == true`,
+			},
+			LogFile: LogFileConfig{
+				FilePath:   tempDir + "/critical_events.log",
+				MaxSize:    1,
+				MaxBackups: 1,
+				MaxAge:     1,
+				Compress:   false,
+			},
+			Forwarding: ForwardingConfig{
+				Enabled: true,
+				Address: "127.0.0.1:9002",
+			},
+		},
+	}
+
+	// Initialize viper with the rule group configurations
+	viper.Set("rule_groups", ruleGroupConfigs)
+
+	testCases := []struct {
+		name              string
+		input             AuditLog
+		expectedLogs      map[string]bool
+		expectAction      gnet.Action
+		expectedForwarded bool
+		expectedForwarder int // 0 for mockForwarder1, 1 for mockForwarder2
+	}{
+		{
+			name: "Normal operation - should forward",
+			input: AuditLog{
+				Type: "request",
+				Auth: Auth{
+					PolicyResults: struct {
+						Allowed          bool `json:"allowed"`
+						GrantingPolicies []struct {
+							Name        string `json:"name"`
+							NamespaceID string `json:"namespace_id"`
+							Type        string `json:"type"`
+						} `json:"granting_policies"`
+					}{
+						Allowed: true,
+					},
+				},
+				Request: Request{
+					Operation: "update",
+					Path:      "secret/data/myapp/config",
+				},
+			},
+			expectedLogs: map[string]bool{
+				tempDir + "/normal_operations.log": true,
+				tempDir + "/critical_events.log":   false,
+			},
+			expectAction:      gnet.Close,
+			expectedForwarded: true,
+			expectedForwarder: 0,
+		},
+		{
+			name: "Critical event - should forward",
+			input: AuditLog{
+				Type: "request",
+				Auth: Auth{
+					PolicyResults: struct {
+						Allowed          bool `json:"allowed"`
+						GrantingPolicies []struct {
+							Name        string `json:"name"`
+							NamespaceID string `json:"namespace_id"`
+							Type        string `json:"type"`
+						} `json:"granting_policies"`
+					}{
+						Allowed: true,
+					},
+				},
+				Request: Request{
+					Operation: "delete",
+					Path:      "secret/data/myapp/config",
+				},
+			},
+			expectedLogs: map[string]bool{
+				tempDir + "/normal_operations.log": false,
+				tempDir + "/critical_events.log":   true,
+			},
+			expectAction:      gnet.Close,
+			expectedForwarded: true,
+			expectedForwarder: 1,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Create mock forwarders
+			mockForwarder1 := &MockForwarder{}
+			mockForwarder2 := &MockForwarder{}
+
+			// Serialize the audit log to JSON
+			frame, err := json.Marshal(tc.input)
+			assert.NoError(t, err)
+
+			// Create the AuditServer
+			logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			as := New(logger)
+
+			// Replace the forwarders with our mocks
+			as.ruleGroups[0].Forwarder = mockForwarder1
+			as.ruleGroups[1].Forwarder = mockForwarder2
+
+			// Set expectations on the mock forwarders
+			mockForwarder1.On("Forward", frame).Return(nil).Maybe()
+			mockForwarder2.On("Forward", frame).Return(nil).Maybe()
+
+			// Call React
+			_, action := as.React(frame, &mockConn{})
+
+			assert.Equal(t, tc.expectAction, action)
+
+			// Give some time for logging and forwarding
+			time.Sleep(100 * time.Millisecond)
+
+			// Check log files
+			for logFile, shouldContain := range tc.expectedLogs {
+				content, err := ioutil.ReadFile(logFile)
+				if shouldContain {
+					assert.NoError(t, err)
+					assert.Contains(t, string(content), string(frame))
+				} else {
+					if !os.IsNotExist(err) {
+						assert.Empty(t, string(content))
+					}
+				}
+			}
+
+			// Check forwarding
+			if tc.expectedForwarded {
+				var expectedForwarder *MockForwarder
+				var unexpectedForwarder *MockForwarder
+				if tc.expectedForwarder == 0 {
+					expectedForwarder = mockForwarder1
+					unexpectedForwarder = mockForwarder2
+				} else {
+					expectedForwarder = mockForwarder2
+					unexpectedForwarder = mockForwarder1
+				}
+				assert.NotEmpty(t, expectedForwarder.GetForwardedData())
+				assert.Equal(t, string(frame), string(expectedForwarder.GetForwardedData()))
+				assert.Empty(t, unexpectedForwarder.GetForwardedData())
+			} else {
+				assert.Empty(t, mockForwarder1.GetForwardedData())
+				assert.Empty(t, mockForwarder2.GetForwardedData())
+			}
+
+			// Verify that the mock expectations were met
+			mockForwarder1.AssertExpectations(t)
+			mockForwarder2.AssertExpectations(t)
+
+			// Clean up log files for next test
+			for logFile := range tc.expectedLogs {
+				os.Remove(logFile)
+			}
+		})
+	}
 }
