@@ -3,7 +3,11 @@ package auditserver
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/ncode/vault-audit-filter/pkg/forwarder"
+	"github.com/ncode/vault-audit-filter/pkg/messaging"
+	"github.com/stretchr/testify/require"
 	"io"
 	"io/ioutil"
 	"net"
@@ -795,6 +799,104 @@ func TestAuditServer_React_WithForwarding(t *testing.T) {
 			// Clean up log files for next test
 			for logFile := range tc.expectedLogs {
 				os.Remove(logFile)
+			}
+		})
+	}
+}
+
+type dummyMessenger struct {
+	sendErr error
+	calls   int
+}
+
+func (d *dummyMessenger) Send(_ string) error {
+	d.calls++
+	return d.sendErr
+}
+
+type dummyForwarder struct {
+	forwardErr error
+	calls      int
+}
+
+func (d *dummyForwarder) Forward(_ []byte) error {
+	d.calls++
+	return d.forwardErr
+}
+
+// minimal JSON frame that parses into an AuditLog
+func auditFrame() []byte {
+	return []byte(`{"type":"request","time":"2000-01-01T00:00:00Z","auth":{},"request":{},"response":{}}`)
+}
+
+// rule‑group factory: match=true → no rules (auto‑match); match=false → 1 rule that always fails.
+func newRuleGroup(match bool, msgr messaging.Messenger, fwd forwarder.Forwarder) RuleGroup {
+	var compiled []CompiledRule
+	if !match {
+		compiled = []CompiledRule{{Program: nil}} // any non‑nil slice forces shouldLog=false
+	}
+	return RuleGroup{
+		Name:          "grp",
+		CompiledRules: compiled,
+		Messenger:     msgr,
+		Forwarder:     fwd,
+		Writer:        new(bytes.Buffer), // satisfies io.Writer, avoids disk I/O
+	}
+}
+
+func TestReact_Branches(t *testing.T) {
+	tests := []struct {
+		name         string
+		group        RuleGroup
+		wantAction   gnet.Action
+		wantMsgCalls int
+		wantFwdCalls int
+	}{
+		{
+			name:       "match_no_side_effects_returns_None",
+			group:      newRuleGroup(true, nil, nil),
+			wantAction: gnet.None,
+		},
+		{
+			name:         "forwarder_ok_triggers_Close",
+			group:        newRuleGroup(true, nil, &dummyForwarder{}),
+			wantAction:   gnet.Close,
+			wantFwdCalls: 1,
+		},
+		{
+			name:         "forwarder_error_triggers_Close",
+			group:        newRuleGroup(true, nil, &dummyForwarder{forwardErr: errors.New("x")}),
+			wantAction:   gnet.Close,
+			wantFwdCalls: 1,
+		},
+		{
+			name:         "messenger_error_triggers_Close",
+			group:        newRuleGroup(true, &dummyMessenger{sendErr: errors.New("x")}, nil),
+			wantAction:   gnet.Close,
+			wantMsgCalls: 1,
+		},
+		{
+			name:       "no_match_triggers_Close",
+			group:      newRuleGroup(false, nil, nil),
+			wantAction: gnet.Close,
+		},
+	}
+
+	frame := auditFrame()
+
+	for _, tc := range tests {
+		tc := tc // capture range variable
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &AuditServer{ruleGroups: []RuleGroup{tc.group}}
+			_, act := srv.React(frame, nil)
+
+			require.Equal(t, tc.wantAction, act)
+
+			if dm, ok := tc.group.Messenger.(*dummyMessenger); ok {
+				require.Equal(t, tc.wantMsgCalls, dm.calls)
+			}
+			if df, ok := tc.group.Forwarder.(*dummyForwarder); ok {
+				require.Equal(t, tc.wantFwdCalls, df.calls)
 			}
 		})
 	}
