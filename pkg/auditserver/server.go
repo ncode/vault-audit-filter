@@ -174,7 +174,6 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 			// zero‑copy write to log when possible
 			if rg.Writer != nil {
 				_, _ = rg.Writer.Write(frame)
-				_, _ = rg.Writer.Write([]byte{'\n'})
 			} else {
 				rg.Logger.Print(string(frame))
 			}
@@ -251,10 +250,7 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 		var messenger messaging.Messenger
 		switch rgConfig.Messaging.Type {
 		case "mattermost":
-			messenger = messaging.NewMattermostMessenger(
-				rgConfig.Messaging.URL,
-				rgConfig.Messaging.Token,
-				rgConfig.Messaging.Channel)
+			messenger = messaging.NewMattermostMessenger(rgConfig.Messaging.URL, rgConfig.Messaging.Token, rgConfig.Messaging.Channel)
 		case "mattermost_webhook":
 			messenger = messaging.NewMattermostWebhookMessenger(rgConfig.Messaging.WebhookURL)
 		default:

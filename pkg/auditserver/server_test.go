@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/ncode/vault-audit-filter/pkg/forwarder"
-	"github.com/ncode/vault-audit-filter/pkg/messaging"
+	"github.com/expr-lang/expr/vm"
 	"github.com/stretchr/testify/require"
 	"io"
 	"io/ioutil"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -829,22 +829,23 @@ func auditFrame() []byte {
 	return []byte(`{"type":"request","time":"2000-01-01T00:00:00Z","auth":{},"request":{},"response":{}}`)
 }
 
-// rule‑group factory: match=true → no rules (auto‑match); match=false → 1 rule that always fails.
-func newRuleGroup(match bool, msgr messaging.Messenger, fwd forwarder.Forwarder) RuleGroup {
-	var compiled []CompiledRule
-	if !match {
-		compiled = []CompiledRule{{Program: nil}} // any non‑nil slice forces shouldLog=false
-	}
-	return RuleGroup{
-		Name:          "grp",
-		CompiledRules: compiled,
-		Messenger:     msgr,
-		Forwarder:     fwd,
-		Writer:        new(bytes.Buffer), // satisfies io.Writer, avoids disk I/O
-	}
+// returns a compiled rule that always evaluates to false
+func falseProgram(t *testing.T) *vm.Program {
+	t.Helper()
+	p, err := expr.Compile("false")
+	require.NoError(t, err)
+	return p
 }
 
 func TestReact_Branches(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	frame := auditFrame()
+
+	newBufLogger := func() (*bytes.Buffer, *log.Logger) {
+		buf := new(bytes.Buffer)
+		return buf, log.New(buf, "", 0)
+	}
+
 	tests := []struct {
 		name         string
 		group        RuleGroup
@@ -853,43 +854,85 @@ func TestReact_Branches(t *testing.T) {
 		wantFwdCalls int
 	}{
 		{
-			name:       "match_no_side_effects_returns_None",
-			group:      newRuleGroup(true, nil, nil),
+			name: "match_no_side_effects_returns_None",
+			group: RuleGroup{
+				Name: "matchOnly",
+				// len==0 => always matches
+				CompiledRules: nil,
+				Writer:        new(bytes.Buffer),
+			},
 			wantAction: gnet.None,
 		},
 		{
-			name:         "forwarder_ok_triggers_Close",
-			group:        newRuleGroup(true, nil, &dummyForwarder{}),
+			name: "logger_print_branch_returns_None",
+			group: func() RuleGroup {
+				// Writer nil so else branch executes
+				buf, lg := newBufLogger()
+				_ = buf // buffer retained if inspection desired
+				return RuleGroup{
+					Name:          "loggerPrint",
+					CompiledRules: nil,
+					Logger:        lg,
+					Writer:        nil,
+				}
+			}(),
+			wantAction: gnet.None,
+		},
+		{
+			name: "forwarder_ok_triggers_Close",
+			group: RuleGroup{
+				Name:          "forwardOK",
+				CompiledRules: nil,
+				Writer:        new(bytes.Buffer),
+				Forwarder:     &dummyForwarder{},
+			},
 			wantAction:   gnet.Close,
 			wantFwdCalls: 1,
 		},
 		{
-			name:         "forwarder_error_triggers_Close",
-			group:        newRuleGroup(true, nil, &dummyForwarder{forwardErr: errors.New("x")}),
+			name: "forwarder_error_triggers_Close",
+			group: RuleGroup{
+				Name:          "forwardErr",
+				CompiledRules: nil,
+				Writer:        new(bytes.Buffer),
+				Forwarder:     &dummyForwarder{forwardErr: errors.New("boom")},
+			},
 			wantAction:   gnet.Close,
 			wantFwdCalls: 1,
 		},
 		{
-			name:         "messenger_error_triggers_Close",
-			group:        newRuleGroup(true, &dummyMessenger{sendErr: errors.New("x")}, nil),
+			name: "messenger_error_triggers_Close",
+			group: RuleGroup{
+				Name:          "msgErr",
+				CompiledRules: nil,
+				Writer:        new(bytes.Buffer),
+				Messenger:     &dummyMessenger{sendErr: errors.New("boom")},
+			},
 			wantAction:   gnet.Close,
 			wantMsgCalls: 1,
 		},
 		{
-			name:       "no_match_triggers_Close",
-			group:      newRuleGroup(false, nil, nil),
+			name: "no_match_triggers_Close",
+			group: RuleGroup{
+				Name: "noMatch",
+				CompiledRules: []CompiledRule{{
+					Program: falseProgram(t),
+				}},
+				Writer: new(bytes.Buffer),
+			},
 			wantAction: gnet.Close,
 		},
 	}
 
-	frame := auditFrame()
-
 	for _, tc := range tests {
 		tc := tc // capture range variable
 		t.Run(tc.name, func(t *testing.T) {
-			srv := &AuditServer{ruleGroups: []RuleGroup{tc.group}}
-			_, act := srv.React(frame, nil)
+			srv := &AuditServer{
+				logger:     logger,
+				ruleGroups: []RuleGroup{tc.group},
+			}
 
+			_, act := srv.React(frame, nil)
 			require.Equal(t, tc.wantAction, act)
 
 			if dm, ok := tc.group.Messenger.(*dummyMessenger); ok {
