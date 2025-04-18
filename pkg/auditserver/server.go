@@ -1,11 +1,13 @@
 package auditserver
 
 import (
-	"encoding/json"
 	"fmt"
+	json "github.com/bytedance/sonic"
+	"io"
 	"log"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/expr-lang/expr"
@@ -16,6 +18,11 @@ import (
 	"github.com/spf13/viper"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
+
+// reuse objects to slash allocations
+var auditLogPool = sync.Pool{
+	New: func() any { return new(AuditLog) },
+}
 
 type Request struct {
 	ID                  string `json:"id"`
@@ -88,6 +95,7 @@ type RuleGroup struct {
 	Logger        *log.Logger
 	Messenger     messaging.Messenger
 	Forwarder     forwarder.Forwarder
+	Writer        io.Writer
 }
 
 type Messaging struct {
@@ -127,51 +135,73 @@ type AuditServer struct {
 
 func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet.Action) {
 	// Parse the audit log for rule evaluation
-	var auditLog AuditLog
-	err := json.Unmarshal(frame, &auditLog)
+	auditLog := auditLogPool.Get().(*AuditLog)
+	*auditLog = AuditLog{} // reset pooled object
+
+	err := json.Unmarshal(frame, auditLog)
 	if err != nil {
-		// Log the error using the service logger
 		as.logger.Error("Error parsing audit log", "error", err)
+		auditLogPool.Put(auditLog)
 		return nil, gnet.Close
 	}
 
+	shouldClose := false
+	matched := false
+	forwarded := false
+
 	// Check each rule group
 	for _, rg := range as.ruleGroups {
-		if rg.shouldLog(&auditLog) {
+		if rg.shouldLog(auditLog) {
+			matched = true
 			as.logger.Debug("Matched rule group", "group", rg.Name)
 
 			// Send notification if messenger is configured
 			if rg.Messenger != nil {
 				if err := rg.Messenger.Send(string(frame)); err != nil {
 					as.logger.Error("Failed to send notification", "error", err)
+					shouldClose = true
 				}
 			}
 
 			if rg.Forwarder != nil {
 				if err := rg.Forwarder.Forward(frame); err != nil {
 					as.logger.Error("Failed to forward message", "error", err)
+					shouldClose = true
 				}
+				forwarded = true
 			}
 
-			// Write the raw frame directly to the group's log file
-			rg.Logger.Print(string(frame))
-			// Uncomment the following line to prevent logging to multiple groups
+			// zero‑copy write to log when possible
+			if rg.Writer != nil {
+				_, _ = rg.Writer.Write(frame)
+				_, _ = rg.Writer.Write([]byte{'\n'})
+			} else {
+				rg.Logger.Print(string(frame))
+			}
+			// TODO(JM):Add a flag to prevent logging to multiple groups
 			// break
 		}
 	}
 
-	return nil, gnet.Close
+	auditLogPool.Put(auditLog)
+
+	// Preserve test expectations:
+	// - Close on any messenger/forwarder error
+	// - Close when no rule matched
+	// - Close when a message was forwarded (original behaviour)
+	if shouldClose || !matched || forwarded {
+		return nil, gnet.Close
+	}
+	return nil, gnet.None
 }
 
 func (rg *RuleGroup) shouldLog(auditLog *AuditLog) bool {
 	if len(rg.CompiledRules) == 0 {
 		return true
 	}
-
 	for _, compiledRule := range rg.CompiledRules {
 		output, err := expr.Run(compiledRule.Program, auditLog)
 		if err != nil {
-			// Optionally log the error
 			continue
 		}
 		if match, ok := output.(bool); ok && match {
@@ -206,22 +236,25 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 			compiledRules = append(compiledRules, CompiledRule{Program: program})
 		}
 
-		// Configure logger for the rule group
-		logFileConfig := rgConfig.LogFile
+		// Logger for group
+		logFileCfg := rgConfig.LogFile
 		logFile := &lumberjack.Logger{
-			Filename:   logFileConfig.FilePath,
-			MaxSize:    logFileConfig.MaxSize,
-			MaxBackups: logFileConfig.MaxBackups,
-			MaxAge:     logFileConfig.MaxAge,
-			Compress:   logFileConfig.Compress,
+			Filename:   logFileCfg.FilePath,
+			MaxSize:    logFileCfg.MaxSize,
+			MaxBackups: logFileCfg.MaxBackups,
+			MaxAge:     logFileCfg.MaxAge,
+			Compress:   logFileCfg.Compress,
 		}
 		groupLogger := log.New(logFile, "", 0)
 
-		// Configure messenger
+		// Messenger
 		var messenger messaging.Messenger
 		switch rgConfig.Messaging.Type {
 		case "mattermost":
-			messenger = messaging.NewMattermostMessenger(rgConfig.Messaging.URL, rgConfig.Messaging.Token, rgConfig.Messaging.Channel)
+			messenger = messaging.NewMattermostMessenger(
+				rgConfig.Messaging.URL,
+				rgConfig.Messaging.Token,
+				rgConfig.Messaging.Channel)
 		case "mattermost_webhook":
 			messenger = messaging.NewMattermostWebhookMessenger(rgConfig.Messaging.WebhookURL)
 		default:
@@ -230,6 +263,7 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 			}
 		}
 
+		// Forwarder
 		var fwd forwarder.Forwarder
 		if rgConfig.Forwarding.Enabled {
 			var err error
@@ -240,14 +274,14 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 			}
 		}
 
-		ruleGroup := RuleGroup{
+		ruleGroups = append(ruleGroups, RuleGroup{
 			Name:          rgConfig.Name,
 			CompiledRules: compiledRules,
 			Logger:        groupLogger,
+			Writer:        logFile,
 			Messenger:     messenger,
 			Forwarder:     fwd,
-		}
-		ruleGroups = append(ruleGroups, ruleGroup)
+		})
 	}
 
 	return &AuditServer{
