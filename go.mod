@@ -1,8 +1,9 @@
 module github.com/ncode/vault-audit-filter
 
-go 1.22.3
+go 1.24.2
 
 require (
+	github.com/bytedance/sonic v1.13.2
 	github.com/expr-lang/expr v1.16.9
 	github.com/hashicorp/vault/api v1.14.0
 	github.com/mattermost/mattermost-server/v6 v6.7.2
@@ -15,7 +16,9 @@ require (
 
 require (
 	github.com/blang/semver v3.5.1+incompatible // indirect
+	github.com/bytedance/sonic/loader v0.2.4 // indirect
 	github.com/cenkalti/backoff/v3 v3.0.0 // indirect
+	github.com/cloudwego/base64x v0.1.5 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dustin/go-humanize v1.0.0 // indirect
 	github.com/dyatlov/go-opengraph v0.0.0-20210112100619-dae8665a5b09 // indirect
@@ -70,6 +73,7 @@ require (
 	github.com/stretchr/objx v0.5.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/tinylib/msgp v1.1.6 // indirect
+	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/vmihailenco/msgpack/v5 v5.3.5 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
@@ -78,6 +82,7 @@ require (
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect
 	go.uber.org/zap v1.21.0 // indirect
+	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
 	golang.org/x/crypto v0.23.0 // indirect
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
 	golang.org/x/net v0.25.0 // indirect
