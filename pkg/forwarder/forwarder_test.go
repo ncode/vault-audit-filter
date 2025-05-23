@@ -46,11 +46,12 @@ func TestUDPForwarder_InvalidAddress(t *testing.T) {
 }
 
 func TestUDPForwarder_UnreachableAddress(t *testing.T) {
-	// Try to create a UDPForwarder with an unreachable address
-	forwarder, err := NewUDPForwarder("8.8.8.8:12345")
+	// Use a local address with no listener. This avoids network
+	// reachability issues while still ensuring the send succeeds.
+	forwarder, err := NewUDPForwarder("127.0.0.1:12345")
 	assert.NoError(t, err) // Creating the forwarder should succeed
 
-	// Trying to forward should not return an error for UDP
+	// Forwarding should not return an error for UDP even if nothing is listening
 	err = forwarder.Forward([]byte("test message"))
 	assert.NoError(t, err)
 }
@@ -68,8 +69,8 @@ func TestNewUDPForwarder_Failure(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no such host")
 
-	// Attempt to create a new UDPForwarder with a valid but unreachable address
-	_, err = NewUDPForwarder("203.0.113.1:12345") // TEST-NET-3 address, should be unreachable
+	// Attempt to create a new UDPForwarder with a valid address where nothing is listening
+	_, err = NewUDPForwarder("127.0.0.1:12345")
 
 	// This should not return an error for UDP, as it's connectionless
 	assert.NoError(t, err)
@@ -83,8 +84,8 @@ func TestNewUDPForwarder_Failure(t *testing.T) {
 }
 
 func TestUDPForwarder_ForwardToUnreachableAddress(t *testing.T) {
-	// Create a new UDPForwarder with a valid but unreachable address
-	forwarder, err := NewUDPForwarder("203.0.113.1:12345") // TEST-NET-3 address, should be unreachable
+	// Create a new UDPForwarder with a valid address where nothing is listening
+	forwarder, err := NewUDPForwarder("127.0.0.1:12345")
 	assert.NoError(t, err)
 
 	// Attempt to forward a message
