@@ -14,7 +14,7 @@
 - **Supports Multiple Operations**: Filters common Vault operations, including KV operations, metadata updates, and deletion events.
 - **Performance-Oriented**: Built with `gnet` to handle high concurrency.
 - **Flexible Forwarding**: Forward filtered audit logs to specified UDP addresses for further processing or monitoring.
-- **Messaging Integration**: Send notifications about matched audit logs to messaging platforms like Mattermost.
+- **Messaging Integration**: Send notifications about matched audit logs to messaging platforms like Slack.
 
 ## Table of Contents
 
@@ -81,8 +81,8 @@ Once you have built the project, you can run the `vault-audit-filter` executable
           enabled: true
           address: "127.0.0.1:9001"
         messaging:
-          type: "mattermost_webhook"
-          webhook_url: "https://your-mattermost-instance.com/hooks/your-webhook-id"
+          type: "slack_webhook"
+          webhook_url: "https://your-slack-instance.com/hooks/your-webhook-id"
 
       - name: "critical_events"
         rules:
@@ -98,8 +98,8 @@ Once you have built the project, you can run the `vault-audit-filter` executable
           enabled: true
           address: "127.0.0.1:9002"
         messaging:
-          type: "mattermost"
-          url: "https://your-mattermost-instance.com"
+          type: "slack"
+          url: "https://slack.com/api/"
           token: "your-bot-token"
           channel: "your-channel-id"
 
@@ -122,11 +122,11 @@ Once you have built the project, you can run the `vault-audit-filter` executable
   - `log_file.compress`: Whether to compress the old log files.
   - `forwarding.enabled`: Whether to enable forwarding for this rule group.
   - `forwarding.address`: The UDP address to forward matching audit logs to.
-  - `messaging.type`: The type of messaging integration ("mattermost" or "mattermost_webhook").
-  - `messaging.webhook_url`: The webhook URL for Mattermost (when using "mattermost_webhook" type).
-  - `messaging.url`: The Mattermost server URL (when using "mattermost" type).
-  - `messaging.token`: The bot token for Mattermost (when using "mattermost" type).
-  - `messaging.channel`: The channel ID for Mattermost messages (when using "mattermost" type).
+  - `messaging.type`: The type of messaging integration ("slack" or "slack_webhook").
+  - `messaging.webhook_url`: The webhook URL for Slack (when using "slack_webhook" type).
+  - `messaging.url`: The Slack API base URL (when using "slack" type).
+  - `messaging.token`: The bot token for Slack (when using "slack" type).
+  - `messaging.channel`: The channel ID for Slack messages (when using "slack" type).
 
 ### Rule Syntax
 

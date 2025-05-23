@@ -104,7 +104,7 @@ func TestAuditServer_React(t *testing.T) {
 				Compress:   false,
 			},
 			Messaging: Messaging{
-				Type:       "mattermost_webhook",
+				Type:       "slack_webhook",
 				WebhookURL: "http://example.com/webhook",
 			},
 		},
@@ -632,7 +632,7 @@ func TestAuditServer_React_WithForwarding(t *testing.T) {
 				Compress:   false,
 			},
 			Messaging: Messaging{
-				Type:       "mattermost_webhook",
+				Type:       "slack_webhook",
 				WebhookURL: mockWebhook.URL,
 			},
 			Forwarding: ForwardingConfig{
