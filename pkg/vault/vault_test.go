@@ -196,6 +196,110 @@ func TestNewVaultClient(t *testing.T) {
 	}
 }
 
+func TestAuthMethods_NilAuthResponse(t *testing.T) {
+	tests := []struct {
+		name       string
+		authMethod AuthMethod
+		setupMock  func(*httptest.Server)
+		errContain string
+	}{
+		{
+			name: "AppRoleAuth_NilAuthResponse",
+			authMethod: AppRoleAuth{
+				RoleID:   "test-role-id",
+				SecretID: "test-secret-id",
+			},
+			setupMock: func(s *httptest.Server) {
+				s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte(`{}`)) // No auth field
+				})
+			},
+			errContain: "empty auth response",
+		},
+		{
+			name: "AppRoleAuth_NilSecret",
+			authMethod: AppRoleAuth{
+				RoleID:   "test-role-id",
+				SecretID: "test-secret-id",
+			},
+			setupMock: func(s *httptest.Server) {
+				s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte(`null`))
+				})
+			},
+			errContain: "empty auth response",
+		},
+		{
+			name: "CertAuth_NilAuthResponse",
+			authMethod: &mockCertAuth{
+				CertAuth: CertAuth{
+					CertFile: "test-cert.pem",
+					KeyFile:  "test-key.pem",
+				},
+				mockConfigureTLS: func(config *vault.Config) error {
+					return nil
+				},
+			},
+			setupMock: func(s *httptest.Server) {
+				s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte(`{}`)) // No auth field
+				})
+			},
+			errContain: "empty auth response",
+		},
+		{
+			name: "JWTAuth_NilAuthResponse",
+			authMethod: JWTAuth{
+				Role: "test-role",
+				JWT:  "test-jwt",
+			},
+			setupMock: func(s *httptest.Server) {
+				s.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte(`{}`)) // No auth field
+				})
+			},
+			errContain: "empty auth response",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer server.Close()
+
+			tt.setupMock(server)
+
+			client, err := NewVaultClient(server.URL, tt.authMethod)
+			assert.Error(t, err)
+			assert.Nil(t, client)
+			assert.Contains(t, err.Error(), tt.errContain)
+		})
+	}
+}
+
+func TestEnableAuditDevice_ListAuditError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/sys/audit" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"errors": ["permission denied"]}`))
+		}
+	}))
+	defer server.Close()
+
+	client, _ := vault.NewClient(&vault.Config{Address: server.URL})
+	vaultClient := &VaultClient{client}
+
+	err := vaultClient.EnableAuditDevice("test-audit", "file", "Test", map[string]string{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to list audit devices")
+}
+
 func TestVaultClient_Operations(t *testing.T) {
 	tests := []struct {
 		name        string

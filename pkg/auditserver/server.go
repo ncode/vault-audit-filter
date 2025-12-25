@@ -173,7 +173,9 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 
 			// zero‑copy write to log when possible
 			if rg.Writer != nil {
-				_, _ = rg.Writer.Write(frame)
+				if _, err := rg.Writer.Write(frame); err != nil {
+					as.logger.Error("Failed to write audit log", "group", rg.Name, "error", err)
+				}
 			} else {
 				rg.Logger.Print(string(frame))
 			}

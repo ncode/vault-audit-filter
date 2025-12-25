@@ -16,7 +16,7 @@ limitations under the License.
 package cmd
 
 import (
-	"os"
+	"fmt"
 
 	"github.com/ncode/vault-audit-filter/pkg/vault"
 	"github.com/spf13/cobra"
@@ -27,18 +27,17 @@ import (
 var setupCmd = &cobra.Command{
 	Use:   "setup",
 	Short: "Setup vault audit device",
-	Long:  ``,
-	Run: func(cmd *cobra.Command, args []string) {
+	Long:  `Configures Vault to send audit logs to this service via UDP socket.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		if viper.GetString("vault.token") == "" {
-			logger.Error("vault.token is required")
-			os.Exit(1)
+			return fmt.Errorf("vault.token is required")
 		}
 
 		client, err := vault.NewVaultClient(viper.GetString("vault.address"), vault.TokenAuth{Token: viper.GetString("vault.token")})
 		if err != nil {
-			logger.Error("setup", "unable to setup vault client", err.Error())
-			os.Exit(1)
+			return fmt.Errorf("unable to setup vault client: %w", err)
 		}
+
 		err = client.EnableAuditDevice(
 			viper.GetString("vault.audit_path"),
 			"socket",
@@ -51,9 +50,13 @@ var setupCmd = &cobra.Command{
 			},
 		)
 		if err != nil {
-			logger.Error("setup", "unable to enable audit device", err.Error())
-			os.Exit(1)
+			return fmt.Errorf("unable to enable audit device: %w", err)
 		}
+
+		logger.Info("Vault audit device configured successfully",
+			"path", viper.GetString("vault.audit_path"),
+			"address", viper.GetString("vault.audit_address"))
+		return nil
 	},
 }
 

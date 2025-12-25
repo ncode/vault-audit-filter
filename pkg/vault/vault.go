@@ -60,6 +60,9 @@ func (a AppRoleAuth) Authenticate(client *vault.Client) error {
 	if err != nil {
 		return fmt.Errorf("failed to authenticate with AppRole: %w", err)
 	}
+	if secret == nil || secret.Auth == nil {
+		return fmt.Errorf("failed to authenticate with AppRole: empty auth response")
+	}
 	client.SetToken(secret.Auth.ClientToken)
 	return nil
 }
@@ -72,6 +75,9 @@ func (c CertAuth) Authenticate(client *vault.Client) error {
 	secret, err := client.Logical().Write("auth/cert/login", nil)
 	if err != nil {
 		return fmt.Errorf("failed to authenticate with certificate: %w", err)
+	}
+	if secret == nil || secret.Auth == nil {
+		return fmt.Errorf("failed to authenticate with certificate: empty auth response")
 	}
 	client.SetToken(secret.Auth.ClientToken)
 	return nil
@@ -97,6 +103,9 @@ func (j JWTAuth) Authenticate(client *vault.Client) error {
 	if err != nil {
 		return fmt.Errorf("failed to authenticate with JWT: %w", err)
 	}
+	if secret == nil || secret.Auth == nil {
+		return fmt.Errorf("failed to authenticate with JWT: empty auth response")
+	}
 	client.SetToken(secret.Auth.ClientToken)
 	return nil
 }
@@ -109,14 +118,14 @@ func NewVaultClient(address string, authMethod AuthMethod) (*VaultClient, error)
 	config := vault.DefaultConfig()
 	config.Address = address
 
+	// Configure TLS before creating the client
+	if err := authMethod.ConfigureTLS(config); err != nil {
+		return nil, fmt.Errorf("failed to configure TLS: %w", err)
+	}
+
 	client, err := vault.NewClient(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Vault client: %w", err)
-	}
-
-	// Configure TLS if necessary
-	if err := authMethod.ConfigureTLS(config); err != nil {
-		return nil, fmt.Errorf("failed to configure TLS: %w", err)
 	}
 
 	// Authenticate
