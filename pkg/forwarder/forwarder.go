@@ -32,3 +32,11 @@ func (f *UDPForwarder) Forward(data []byte) error {
 	_, err := f.conn.Write(data)
 	return err
 }
+
+// Close closes the UDP connection
+func (f *UDPForwarder) Close() error {
+	if f.conn != nil {
+		return f.conn.Close()
+	}
+	return nil
+}

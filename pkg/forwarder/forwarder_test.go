@@ -61,6 +61,35 @@ func TestForwarderInterface(t *testing.T) {
 	var _ Forwarder = (*UDPForwarder)(nil)
 }
 
+func TestUDPForwarder_Close(t *testing.T) {
+	// Start a mock UDP server
+	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	assert.NoError(t, err)
+
+	conn, err := net.ListenUDP("udp", addr)
+	assert.NoError(t, err)
+	defer conn.Close()
+
+	// Create a new UDPForwarder
+	forwarder, err := NewUDPForwarder(conn.LocalAddr().String())
+	assert.NoError(t, err)
+
+	// Close the forwarder
+	err = forwarder.Close()
+	assert.NoError(t, err)
+
+	// Forwarding after close should fail
+	err = forwarder.Forward([]byte("test message"))
+	assert.Error(t, err)
+}
+
+func TestUDPForwarder_CloseNilConn(t *testing.T) {
+	// Test closing a forwarder with nil connection
+	forwarder := &UDPForwarder{conn: nil}
+	err := forwarder.Close()
+	assert.NoError(t, err)
+}
+
 func TestNewUDPForwarder_Failure(t *testing.T) {
 	// Attempt to create a new UDPForwarder with an invalid address
 	_, err := NewUDPForwarder("256.0.0.1:12345") // Invalid IP address

@@ -17,32 +17,25 @@ package cmd
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/ncode/vault-audit-filter/pkg/auditserver"
 	"github.com/panjf2000/gnet"
-	"github.com/spf13/viper"
-
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 // auditServerCmd represents the auditServer command
 var auditServerCmd = &cobra.Command{
 	Use:   "auditServer",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Short: "Start the audit server to receive and filter Vault audit logs",
+	Long:  `Starts a UDP server that receives Vault audit logs and filters them based on configured rules.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		addr := fmt.Sprintf("udp://%s", viper.GetString("vault.audit_address"))
-		server, err := auditserver.New(nil)
+		server, err := auditserver.New(logger)
 		if err != nil {
-			logger.Error(err.Error())
+			return fmt.Errorf("failed to create audit server: %w", err)
 		}
-		log.Fatal(gnet.Serve(server, addr, gnet.WithMulticore(true)))
+		return gnet.Serve(server, addr, gnet.WithMulticore(true))
 	},
 }
 
