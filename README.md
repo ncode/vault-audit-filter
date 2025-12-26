@@ -33,7 +33,7 @@ These instructions will help you set up and run `vault-audit-filter` on your loc
 
 ### Prerequisites
 
-- **Go**: Ensure you have Go 1.22.3 or later installed. You can download it here: <https://golang.org/dl/>
+- **Go**: Ensure you have Go 1.25.5 or later installed. You can download it here: <https://golang.org/dl/>
 - **Vault**: You should have HashiCorp Vault installed and configured. Instructions can be found here: <https://www.vaultproject.io/docs/install>
 
 ### Installation
@@ -143,16 +143,34 @@ Rules are written using the `expr` language, a simple and safe expression langua
 
 ## Usage
 
-To run `vault-audit-filter` with your configuration file, use:
+`vault-audit-filter` provides two subcommands:
+
+### Setup Vault Audit Device
+
+Configure Vault to send audit logs to this service:
 
 ```bash
-$ ./vault-audit-filter --config config.yaml
+./vault-audit-filter setup --config config.yaml
+```
+
+### Start the Audit Server
+
+Start the UDP server to receive and filter Vault audit logs:
+
+```bash
+./vault-audit-filter auditServer --config config.yaml
 ```
 
 ### Command-Line Options
 
-- `--config`: Specify the path to the configuration file (default is `config.yaml`).
-- `--log-level`: Set the logging level (`debug`, `info`, `warn`, `error`).
+**Global flags:**
+
+- `--config`: Specify the path to the configuration file (default is `$HOME/.vault-audit-filter.yaml`).
+- `--vault.address`: Vault server address (default: `http://127.0.0.1:8200`).
+- `--vault.token`: Vault authentication token.
+- `--vault.audit_path`: Path for the Vault audit device (default: `/vault-audit-filter`).
+- `--vault.audit_address`: Address for receiving audit logs (default: `127.0.0.1:1269`).
+- `--vault.audit_description`: Description for the Vault audit device.
 
 ### Environment Variables
 
