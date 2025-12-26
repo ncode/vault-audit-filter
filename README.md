@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![codecov](https://codecov.io/gh/ncode/vault-audit-filter/graph/badge.svg?token=PTW9OYF19R)](https://codecov.io/gh/ncode/vault-audit-filter)
 
-`vault-audit-filter` is a Go-based tool designed to filter and log HashiCorp Vault audit logs based on configurable rules. It provides fine-grained control over how Vault audit events are processed and categorized, allowing you to capture critical events while reducing noise from routine operations.
+`vault-audit-filter` is designed to filter and log HashiCorp Vault audit logs based on configurable rules. It provides fine-grained control over how Vault audit events are processed and categorized, allowing you to capture critical events while reducing noise from routine operations.
 
 ## Features
 
