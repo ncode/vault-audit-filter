@@ -19,7 +19,7 @@ services:
 
   # UDP receiver for testing forwarding
   udp-receiver:
-    image: alpine:3.19
+    image: alpine:3.23
     container_name: udp-receiver-integration
     ports:
       - "9999:9999/udp"
