@@ -43,7 +43,7 @@ services:
     entrypoint: "/scripts/writer.sh"
 
   udp_receiver:
-    image: oraclelinux:9
+    image: oraclelinux:10
     container_name: udp_receiver
     volumes:
       - ./scripts:/scripts:ro
