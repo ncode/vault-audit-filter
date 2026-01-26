@@ -282,9 +282,9 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 		var messenger messaging.Messenger
 		switch rgConfig.Messaging.Type {
 		case "slack":
-			messenger = messaging.NewSlackMessenger(rgConfig.Messaging.URL, rgConfig.Messaging.Token, rgConfig.Messaging.Channel)
+			messenger = messaging.NewSlackMessenger(rgConfig.Messaging.URL, rgConfig.Messaging.Token, rgConfig.Messaging.Channel, asyncTimeout)
 		case "slack_webhook":
-			messenger = messaging.NewSlackWebhookMessenger(rgConfig.Messaging.WebhookURL)
+			messenger = messaging.NewSlackWebhookMessenger(rgConfig.Messaging.WebhookURL, asyncTimeout)
 		default:
 			if rgConfig.Messaging.Type != "" {
 				logger.Error("Invalid messenger type", "type", rgConfig.Messaging.Type)
