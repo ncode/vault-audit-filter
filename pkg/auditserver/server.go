@@ -129,8 +129,10 @@ type LogFileConfig struct {
 
 type AuditServer struct {
 	*gnet.EventServer
-	logger     *slog.Logger
-	ruleGroups []RuleGroup
+	logger         *slog.Logger
+	ruleGroups     []RuleGroup
+	asyncQueueSize int
+	asyncTimeout   time.Duration
 }
 
 func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet.Action) {
@@ -217,6 +219,20 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 
+	viper.SetDefault("async.queue_size", 20)
+	viper.SetDefault("async.timeout", "5s")
+
+	queueSize := viper.GetInt("async.queue_size")
+	if queueSize <= 0 {
+		queueSize = 20
+	}
+	rawTimeout := viper.GetString("async.timeout")
+	asyncTimeout, err := time.ParseDuration(rawTimeout)
+	if err != nil {
+		asyncTimeout = 5 * time.Second
+		logger.Warn("Invalid async.timeout; using default", "value", rawTimeout)
+	}
+
 	// Load rule groups from configuration
 	var ruleGroupConfigs []RuleGroupConfig
 	if err := viper.UnmarshalKey("rule_groups", &ruleGroupConfigs); err != nil {
@@ -233,8 +249,10 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 			Logger:        defaultLogger,
 		})
 		return &AuditServer{
-			logger:     logger,
-			ruleGroups: ruleGroups,
+			logger:         logger,
+			ruleGroups:     ruleGroups,
+			asyncQueueSize: queueSize,
+			asyncTimeout:   asyncTimeout,
 		}, nil
 	}
 	for _, rgConfig := range ruleGroupConfigs {
@@ -295,7 +313,9 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 	}
 
 	return &AuditServer{
-		logger:     logger,
-		ruleGroups: ruleGroups,
+		logger:         logger,
+		ruleGroups:     ruleGroups,
+		asyncQueueSize: queueSize,
+		asyncTimeout:   asyncTimeout,
 	}, nil
 }

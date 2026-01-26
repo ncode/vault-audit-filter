@@ -353,6 +353,15 @@ func TestNew_DefaultRuleGroup_WhenMissingOrEmpty(t *testing.T) {
 	require.Len(t, server.ruleGroups, 1)
 }
 
+func TestNew_AsyncDefaults(t *testing.T) {
+	viper.Reset()
+	server, err := New(nil)
+	require.NoError(t, err)
+	require.NotNil(t, server)
+	assert.Equal(t, 20, server.asyncQueueSize)
+	assert.Equal(t, 5*time.Second, server.asyncTimeout)
+}
+
 func TestNewWithoutLogger(t *testing.T) {
 	// Redirect stdout to capture log output
 	oldStdout := os.Stdout
