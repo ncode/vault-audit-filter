@@ -160,7 +160,7 @@ func TestAuditServer_React(t *testing.T) {
 			expectedLogs: map[string]bool{
 				tempDir + "/normal_operations.log": true,
 			},
-			expectAction:   gnet.Close,
+			expectAction:   gnet.None,
 			messengerError: fmt.Errorf("failed to send message"),
 			expectedLogMessages: []string{
 				"Failed to send notification",
@@ -389,6 +389,43 @@ func TestSideQueue_DropsWhenFull(t *testing.T) {
 	_, _ = srv.React(frame, nil)
 
 	assert.Equal(t, uint64(1), srv.sideDrops.Load())
+}
+
+func TestReact_AsyncMessengerCalled(t *testing.T) {
+	viper.Reset()
+	viper.Set("async.queue_size", 10)
+	viper.Set("rule_groups", []map[string]interface{}{
+		{
+			"name":     "rg",
+			"rules":    []string{"true"},
+			"log_file": map[string]interface{}{"file_path": "/tmp/test.log", "max_size": 1},
+			"messaging": map[string]interface{}{
+				"type":        "slack_webhook",
+				"webhook_url": "http://example.com",
+			},
+		},
+	})
+
+	srv, err := New(nil)
+	require.NoError(t, err)
+
+	called := make(chan struct{}, 1)
+	for i := range srv.ruleGroups {
+		srv.ruleGroups[i].Messenger = &MockMessenger{SendFunc: func(string) error {
+			called <- struct{}{}
+			return nil
+		}}
+	}
+
+	frame := []byte(`{"type":"request","time":"2000-01-01T00:00:00Z","auth":{},"request":{},"response":{}}`)
+	_, action := srv.React(frame, nil)
+	assert.Equal(t, gnet.None, action)
+
+	select {
+	case <-called:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("messenger not called")
+	}
 }
 
 func TestNewWithoutLogger(t *testing.T) {
@@ -752,7 +789,7 @@ func TestAuditServer_React_WithForwarding(t *testing.T) {
 				tempDir + "/normal_operations.log": true,
 				tempDir + "/critical_events.log":   false,
 			},
-			expectAction:      gnet.Close,
+			expectAction:      gnet.None,
 			expectedForwarded: true,
 			expectedForwarder: 0,
 		},
@@ -781,7 +818,7 @@ func TestAuditServer_React_WithForwarding(t *testing.T) {
 				tempDir + "/normal_operations.log": false,
 				tempDir + "/critical_events.log":   true,
 			},
-			expectAction:      gnet.Close,
+			expectAction:      gnet.None,
 			expectedForwarded: true,
 			expectedForwarder: 1,
 		},
@@ -943,7 +980,7 @@ func TestReact_Branches(t *testing.T) {
 				Writer:        new(bytes.Buffer),
 				Forwarder:     &dummyForwarder{},
 			},
-			wantAction:   gnet.Close,
+			wantAction:   gnet.None,
 			wantFwdCalls: 1,
 		},
 		{
@@ -954,7 +991,7 @@ func TestReact_Branches(t *testing.T) {
 				Writer:        new(bytes.Buffer),
 				Forwarder:     &dummyForwarder{forwardErr: errors.New("boom")},
 			},
-			wantAction:   gnet.Close,
+			wantAction:   gnet.None,
 			wantFwdCalls: 1,
 		},
 		{
@@ -965,7 +1002,7 @@ func TestReact_Branches(t *testing.T) {
 				Writer:        new(bytes.Buffer),
 				Messenger:     &dummyMessenger{sendErr: errors.New("boom")},
 			},
-			wantAction:   gnet.Close,
+			wantAction:   gnet.None,
 			wantMsgCalls: 1,
 		},
 		{
