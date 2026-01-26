@@ -1022,18 +1022,28 @@ func TestReact_Branches(t *testing.T) {
 		tc := tc // capture range variable
 		t.Run(tc.name, func(t *testing.T) {
 			srv := &AuditServer{
-				logger:     logger,
+				logger:    logger,
 				ruleGroups: []RuleGroup{tc.group},
+				sideQueue: make(chan sideTask, 2),
 			}
+			srv.startSideWorkers(1)
 
 			_, act := srv.React(frame, nil)
 			require.Equal(t, tc.wantAction, act)
 
 			if dm, ok := tc.group.Messenger.(*dummyMessenger); ok {
-				require.Equal(t, tc.wantMsgCalls, dm.calls)
+				if tc.wantMsgCalls > 0 {
+					require.Eventually(t, func() bool { return dm.calls == tc.wantMsgCalls }, time.Second, 10*time.Millisecond)
+				} else {
+					require.Equal(t, tc.wantMsgCalls, dm.calls)
+				}
 			}
 			if df, ok := tc.group.Forwarder.(*dummyForwarder); ok {
-				require.Equal(t, tc.wantFwdCalls, df.calls)
+				if tc.wantFwdCalls > 0 {
+					require.Eventually(t, func() bool { return df.calls == tc.wantFwdCalls }, time.Second, 10*time.Millisecond)
+				} else {
+					require.Equal(t, tc.wantFwdCalls, df.calls)
+				}
 			}
 		})
 	}
