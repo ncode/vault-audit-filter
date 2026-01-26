@@ -60,6 +60,23 @@ func (m *MockMessenger) Send(message string) error {
 	return nil
 }
 
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // mockConn is a mock implementation of gnet.Conn
 type mockConn struct{}
 
@@ -210,8 +227,8 @@ func TestAuditServer_React(t *testing.T) {
 			}
 
 			// Capture logs
-			var logBuffer bytes.Buffer
-			logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			logBuffer := &lockedBuffer{}
+			logger := slog.New(slog.NewJSONHandler(logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 			// Create the AuditServer
 			as, _ := New(logger)
@@ -303,8 +320,8 @@ func TestNew(t *testing.T) {
 	viper.Set("rule_groups", ruleGroupConfigs)
 
 	// Capture logs
-	var logBuffer bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logBuffer := &lockedBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	server, _ := New(logger)
 	if len(server.ruleGroups) != len(ruleGroupConfigs) {
@@ -900,22 +917,40 @@ func TestAuditServer_React_WithForwarding(t *testing.T) {
 
 type dummyMessenger struct {
 	sendErr error
+	mu      sync.Mutex
 	calls   int
 }
 
 func (d *dummyMessenger) Send(_ string) error {
+	d.mu.Lock()
 	d.calls++
+	d.mu.Unlock()
 	return d.sendErr
+}
+
+func (d *dummyMessenger) Calls() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.calls
 }
 
 type dummyForwarder struct {
 	forwardErr error
+	mu         sync.Mutex
 	calls      int
 }
 
 func (d *dummyForwarder) Forward(_ []byte) error {
+	d.mu.Lock()
 	d.calls++
+	d.mu.Unlock()
 	return d.forwardErr
+}
+
+func (d *dummyForwarder) Calls() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.calls
 }
 
 // minimal JSON frame that parses into an AuditLog
@@ -1033,16 +1068,16 @@ func TestReact_Branches(t *testing.T) {
 
 			if dm, ok := tc.group.Messenger.(*dummyMessenger); ok {
 				if tc.wantMsgCalls > 0 {
-					require.Eventually(t, func() bool { return dm.calls == tc.wantMsgCalls }, time.Second, 10*time.Millisecond)
+					require.Eventually(t, func() bool { return dm.Calls() == tc.wantMsgCalls }, time.Second, 10*time.Millisecond)
 				} else {
-					require.Equal(t, tc.wantMsgCalls, dm.calls)
+					require.Equal(t, tc.wantMsgCalls, dm.Calls())
 				}
 			}
 			if df, ok := tc.group.Forwarder.(*dummyForwarder); ok {
 				if tc.wantFwdCalls > 0 {
-					require.Eventually(t, func() bool { return df.calls == tc.wantFwdCalls }, time.Second, 10*time.Millisecond)
+					require.Eventually(t, func() bool { return df.Calls() == tc.wantFwdCalls }, time.Second, 10*time.Millisecond)
 				} else {
-					require.Equal(t, tc.wantFwdCalls, df.calls)
+					require.Equal(t, tc.wantFwdCalls, df.Calls())
 				}
 			}
 		})
