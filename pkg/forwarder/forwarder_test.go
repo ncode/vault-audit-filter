@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestUDPForwarder(t *testing.T) {
@@ -122,6 +123,21 @@ func TestUDPForwarder_ForwardToUnreachableAddress(t *testing.T) {
 
 	// This should not return an error for UDP, as it's connectionless
 	assert.NoError(t, err)
+}
+
+func TestUDPForwarder_SetTimeout(t *testing.T) {
+	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	conn, err := net.ListenUDP("udp", addr)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	forwarder, err := NewUDPForwarder(conn.LocalAddr().String())
+	require.NoError(t, err)
+
+	forwarder.SetTimeout(10 * time.Millisecond)
+	assert.NoError(t, forwarder.Forward([]byte("msg")))
 }
 
 func TestUDPForwarder_ConcurrentForwarding(t *testing.T) {

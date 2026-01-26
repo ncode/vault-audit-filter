@@ -300,6 +300,9 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 				logger.Error("Failed to create UDP forwarder", "error", err)
 				return nil, fmt.Errorf("failed to create UDP forwarder: %w", err)
 			}
+			if udpFwd, ok := fwd.(*forwarder.UDPForwarder); ok {
+				udpFwd.SetTimeout(asyncTimeout)
+			}
 		}
 
 		ruleGroups = append(ruleGroups, RuleGroup{
