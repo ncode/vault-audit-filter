@@ -68,6 +68,10 @@ Once you have built the project, you can run the `vault-audit-filter` executable
       audit_address: "127.0.0.1:1269"
       audit_description: "Vault Audit Filter Device"
 
+    async:
+      queue_size: 20
+      timeout: 5s
+
     rule_groups:
       - name: "normal_operations"
         rules:
@@ -128,6 +132,10 @@ Once you have built the project, you can run the `vault-audit-filter` executable
   - `messaging.url`: The Slack API base URL (when using "slack" type).
   - `messaging.token`: The bot token for Slack (when using "slack" type).
   - `messaging.channel`: The channel ID for Slack messages (when using "slack" type).
+
+  - **Async Settings**:
+  - `async.queue_size`: Bounded queue length for async side effects (drop on full).
+  - `async.timeout`: Timeout for Slack API/webhook and forwarding operations.
 
 ### Rule Syntax
 
