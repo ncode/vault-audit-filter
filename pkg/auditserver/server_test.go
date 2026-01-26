@@ -334,6 +334,25 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestNew_DefaultRuleGroup_WhenMissingOrEmpty(t *testing.T) {
+	viper.Reset()
+
+	// Missing rule_groups
+	server, err := New(nil)
+	require.NoError(t, err)
+	require.NotNil(t, server)
+	require.Len(t, server.ruleGroups, 1)
+	assert.Len(t, server.ruleGroups[0].CompiledRules, 0)
+	assert.NotNil(t, server.ruleGroups[0].Logger)
+
+	// Empty rule_groups
+	viper.Reset()
+	viper.Set("rule_groups", []map[string]interface{}{})
+	server, err = New(nil)
+	require.NoError(t, err)
+	require.Len(t, server.ruleGroups, 1)
+}
+
 func TestNewWithoutLogger(t *testing.T) {
 	// Redirect stdout to capture log output
 	oldStdout := os.Stdout

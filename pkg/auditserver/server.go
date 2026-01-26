@@ -225,6 +225,18 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 	}
 
 	var ruleGroups []RuleGroup
+	if len(ruleGroupConfigs) == 0 {
+		defaultLogger := log.New(os.Stdout, "", 0)
+		ruleGroups = append(ruleGroups, RuleGroup{
+			Name:          "default",
+			CompiledRules: nil,
+			Logger:        defaultLogger,
+		})
+		return &AuditServer{
+			logger:     logger,
+			ruleGroups: ruleGroups,
+		}, nil
+	}
 	for _, rgConfig := range ruleGroupConfigs {
 		// Compile rules
 		var compiledRules []CompiledRule
