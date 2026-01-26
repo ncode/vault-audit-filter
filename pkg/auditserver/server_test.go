@@ -362,6 +362,35 @@ func TestNew_AsyncDefaults(t *testing.T) {
 	assert.Equal(t, 5*time.Second, server.asyncTimeout)
 }
 
+func TestSideQueue_DropsWhenFull(t *testing.T) {
+	viper.Reset()
+	viper.Set("async.queue_size", 1)
+	oldWorkers := defaultSideWorkers
+	defaultSideWorkers = 0
+	defer func() { defaultSideWorkers = oldWorkers }()
+
+	viper.Set("rule_groups", []map[string]interface{}{
+		{
+			"name":     "rg",
+			"rules":    []string{"true"},
+			"log_file": map[string]interface{}{"file_path": "/tmp/test.log", "max_size": 1},
+			"messaging": map[string]interface{}{
+				"type":        "slack_webhook",
+				"webhook_url": "http://example.com",
+			},
+		},
+	})
+
+	srv, err := New(nil)
+	require.NoError(t, err)
+
+	frame := []byte(`{"type":"request","time":"2000-01-01T00:00:00Z","auth":{},"request":{},"response":{}}`)
+	_, _ = srv.React(frame, nil)
+	_, _ = srv.React(frame, nil)
+
+	assert.Equal(t, uint64(1), srv.sideDrops.Load())
+}
+
 func TestNewWithoutLogger(t *testing.T) {
 	// Redirect stdout to capture log output
 	oldStdout := os.Stdout

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/expr-lang/expr"
@@ -131,6 +132,8 @@ type AuditServer struct {
 	*gnet.EventServer
 	logger         *slog.Logger
 	ruleGroups     []RuleGroup
+	sideQueue      chan sideTask
+	sideDrops      atomic.Uint64
 	asyncQueueSize int
 	asyncTimeout   time.Duration
 }
@@ -147,9 +150,11 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 		return nil, gnet.Close
 	}
 
-	shouldClose := false
 	matched := false
-	forwarded := false
+	var payload []byte
+	var payloadStr string
+	payloadReady := false
+	payloadStrReady := false
 
 	// Check each rule group
 	for _, rg := range as.ruleGroups {
@@ -157,20 +162,21 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 			matched = true
 			as.logger.Debug("Matched rule group", "group", rg.Name)
 
-			// Send notification if messenger is configured
-			if rg.Messenger != nil {
-				if err := rg.Messenger.Send(string(frame)); err != nil {
-					as.logger.Error("Failed to send notification", "error", err)
-					shouldClose = true
+			if rg.Messenger != nil || rg.Forwarder != nil {
+				if !payloadReady {
+					payload = append([]byte(nil), frame...)
+					payloadReady = true
 				}
-			}
-
-			if rg.Forwarder != nil {
-				if err := rg.Forwarder.Forward(frame); err != nil {
-					as.logger.Error("Failed to forward message", "error", err)
-					shouldClose = true
+				if rg.Messenger != nil && !payloadStrReady {
+					payloadStr = string(payload)
+					payloadStrReady = true
 				}
-				forwarded = true
+				_ = as.enqueueSide(sideTask{
+					payload:    payload,
+					payloadStr: payloadStr,
+					messenger:  rg.Messenger,
+					forwarder:  rg.Forwarder,
+				})
 			}
 
 			// zero‑copy write to log when possible
@@ -179,7 +185,11 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 					as.logger.Error("Failed to write audit log", "group", rg.Name, "error", err)
 				}
 			} else {
-				rg.Logger.Print(string(frame))
+				if payloadStrReady {
+					rg.Logger.Print(payloadStr)
+				} else {
+					rg.Logger.Print(string(frame))
+				}
 			}
 			// TODO(JM):Add a flag to prevent logging to multiple groups
 			// break
@@ -188,11 +198,7 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 
 	auditLogPool.Put(auditLog)
 
-	// Preserve test expectations:
-	// - Close on any messenger/forwarder error
-	// - Close when no rule matched
-	// - Close when a message was forwarded (original behaviour)
-	if shouldClose || !matched || forwarded {
+	if !matched {
 		return nil, gnet.Close
 	}
 	return nil, gnet.None
@@ -248,14 +254,8 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 			CompiledRules: nil,
 			Logger:        defaultLogger,
 		})
-		return &AuditServer{
-			logger:         logger,
-			ruleGroups:     ruleGroups,
-			asyncQueueSize: queueSize,
-			asyncTimeout:   asyncTimeout,
-		}, nil
-	}
-	for _, rgConfig := range ruleGroupConfigs {
+	} else {
+		for _, rgConfig := range ruleGroupConfigs {
 		// Compile rules
 		var compiledRules []CompiledRule
 		for _, ruleStr := range rgConfig.Rules {
@@ -311,11 +311,15 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 			Forwarder:     fwd,
 		})
 	}
+	}
 
-	return &AuditServer{
+	server := &AuditServer{
 		logger:         logger,
 		ruleGroups:     ruleGroups,
+		sideQueue:      make(chan sideTask, queueSize),
 		asyncQueueSize: queueSize,
 		asyncTimeout:   asyncTimeout,
-	}, nil
+	}
+	server.startSideWorkers(defaultSideWorkers)
+	return server, nil
 }
