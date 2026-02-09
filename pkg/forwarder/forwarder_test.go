@@ -140,6 +140,13 @@ func TestUDPForwarder_SetTimeout(t *testing.T) {
 	assert.NoError(t, forwarder.Forward([]byte("msg")))
 }
 
+func TestUDPForwarder_ForwardNilConn(t *testing.T) {
+	forwarder := &UDPForwarder{}
+	err := forwarder.Forward([]byte("msg"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "udp connection is nil")
+}
+
 func TestUDPForwarder_ConcurrentForwarding(t *testing.T) {
 	// Start a mock UDP server
 	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")

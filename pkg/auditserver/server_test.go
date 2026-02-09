@@ -1326,3 +1326,167 @@ func TestReact_Branches(t *testing.T) {
 		})
 	}
 }
+
+type errSideTaskStore struct {
+	mu          sync.Mutex
+	saveErr     error
+	deleteErr   error
+	deadErr     error
+	pendingErr  error
+	pending     []sideTask
+	saveCalls   int
+	deleteCalls int
+	deadCalls   int
+}
+
+func (s *errSideTaskStore) Save(task sideTask) error {
+	s.mu.Lock()
+	s.saveCalls++
+	if s.saveErr == nil {
+		s.pending = append(s.pending, task)
+	}
+	s.mu.Unlock()
+	return s.saveErr
+}
+
+func (s *errSideTaskStore) Delete(id string) error {
+	s.mu.Lock()
+	s.deleteCalls++
+	if s.deleteErr == nil && id != "" {
+		filtered := s.pending[:0]
+		for _, task := range s.pending {
+			if task.id != id {
+				filtered = append(filtered, task)
+			}
+		}
+		s.pending = filtered
+	}
+	s.mu.Unlock()
+	return s.deleteErr
+}
+
+func (s *errSideTaskStore) MoveToDeadLetter(task sideTask, reason string) error {
+	s.mu.Lock()
+	s.deadCalls++
+	s.mu.Unlock()
+	_ = task
+	_ = reason
+	return s.deadErr
+}
+
+func (s *errSideTaskStore) Pending() ([]sideTask, error) {
+	if s.pendingErr != nil {
+		return nil, s.pendingErr
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]sideTask, len(s.pending))
+	copy(out, s.pending)
+	return out, nil
+}
+
+func TestNew_AsyncInvalidConfigFallsBackToDefaults(t *testing.T) {
+	viper.Reset()
+	viper.Set("rule_groups", []map[string]interface{}{})
+	viper.Set("async.queue_size", 0)
+	viper.Set("async.workers", -3)
+	viper.Set("async.enqueue_mode", "invalid")
+	viper.Set("async.enqueue_timeout", "not-a-duration")
+	viper.Set("async.timeout", "also-bad")
+	viper.Set("async.durable.enabled", false)
+	viper.Set("async.durable.dir", "")
+	viper.Set("async.retry.max_attempts", 0)
+	viper.Set("async.retry.backoff", "bad")
+
+	server, err := New(nil)
+	require.NoError(t, err)
+	require.NotNil(t, server)
+	assert.Equal(t, 20, server.asyncQueueSize)
+	assert.Equal(t, defaultSideWorkers, server.asyncWorkers)
+	assert.Equal(t, "drop", server.asyncEnqueueMode)
+	assert.Equal(t, 5*time.Millisecond, server.asyncEnqueueTimeout)
+	assert.Equal(t, 5*time.Second, server.asyncTimeout)
+	assert.Equal(t, "./.vault-audit-filter-sideeffects", server.asyncDurableDir)
+	assert.Equal(t, 3, server.asyncRetryMaxAttempts)
+	assert.Equal(t, 100*time.Millisecond, server.asyncRetryBackoff)
+}
+
+func TestEnqueueSide_DurableSaveFailureReturnsFalse(t *testing.T) {
+	store := &errSideTaskStore{saveErr: errors.New("save failed")}
+	as := &AuditServer{
+		logger:              slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		sideQueue:           make(chan sideTask, 1),
+		asyncDurableEnabled: true,
+		sideStore:           store,
+	}
+
+	ok := as.enqueueSide(sideTask{id: "task-1"})
+	assert.False(t, ok)
+	assert.Equal(t, uint64(0), as.sideDrops.Load())
+}
+
+func TestEnqueueSide_WaitMode_DurableTimeoutReturnsTrue(t *testing.T) {
+	store := &errSideTaskStore{}
+	as := &AuditServer{
+		logger:              slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		sideQueue:           make(chan sideTask, 1),
+		asyncEnqueueMode:    "wait",
+		asyncEnqueueTimeout: 2 * time.Millisecond,
+		asyncDurableEnabled: true,
+		asyncRetryBackoff:   1 * time.Millisecond,
+		sideStore:           store,
+	}
+	as.sideQueue <- sideTask{id: "occupied"}
+
+	ok := as.enqueueSide(sideTask{id: "task-2"})
+	assert.True(t, ok)
+	assert.Equal(t, uint64(0), as.sideDrops.Load())
+}
+
+func TestFileSideTaskStore_Branches(t *testing.T) {
+	t.Run("new_store_errors", func(t *testing.T) {
+		baseDir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(baseDir, "deadletter"), []byte("x"), 0o600))
+		_, err := newFileSideTaskStore(baseDir)
+		require.Error(t, err)
+
+		fileBase := filepath.Join(t.TempDir(), "base-file")
+		require.NoError(t, os.WriteFile(fileBase, []byte("x"), 0o600))
+		_, err = newFileSideTaskStore(fileBase)
+		require.Error(t, err)
+	})
+
+	t.Run("save_delete_move_pending_edge_cases", func(t *testing.T) {
+		store, err := newFileSideTaskStore(t.TempDir())
+		require.NoError(t, err)
+
+		assert.Error(t, store.Save(sideTask{}))
+		assert.NoError(t, store.Delete(""))
+		assert.NoError(t, store.Delete("missing"))
+		assert.NoError(t, store.MoveToDeadLetter(sideTask{}, "ignored"))
+
+		badFile := filepath.Join(store.pendingDir, "broken.json")
+		require.NoError(t, os.WriteFile(badFile, []byte("{"), 0o600))
+		_, err = store.Pending()
+		require.Error(t, err)
+
+		store.pendingDir = filepath.Join(t.TempDir(), "pending-file")
+		require.NoError(t, os.WriteFile(store.pendingDir, []byte("x"), 0o600))
+		err = store.Delete("id-1")
+		require.Error(t, err)
+	})
+}
+
+func TestReplayDurablePending_NoStoreOrPendingError(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	asNoStore := &AuditServer{logger: logger}
+	asNoStore.replayDurablePending()
+
+	asErr := &AuditServer{
+		logger:    logger,
+		sideQueue: make(chan sideTask, 1),
+		sideStore: &errSideTaskStore{pendingErr: errors.New("boom")},
+	}
+	asErr.replayDurablePending()
+}
