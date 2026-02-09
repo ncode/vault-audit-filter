@@ -32,3 +32,4 @@ go.work.sum
 
 # ignore the log directory
 configs/development/logs/
+.worktrees/

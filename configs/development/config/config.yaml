@@ -1,3 +1,8 @@
+async:
+  queue_size: 20
+  workers: 2
+  timeout: 5s
+
 rule_groups:
   - name: "normal_operations"
     rules:

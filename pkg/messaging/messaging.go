@@ -2,6 +2,9 @@ package messaging
 
 import (
 	"fmt"
+	"net/http"
+	"time"
+
 	"github.com/slack-go/slack"
 )
 
@@ -22,11 +25,12 @@ type SlackMessenger struct {
 }
 
 // NewSlackMessenger creates a new SlackMessenger
-func NewSlackMessenger(serverURL, token, channel string) *SlackMessenger {
+func NewSlackMessenger(serverURL, token, channel string, timeout time.Duration) *SlackMessenger {
 	opts := []slack.Option{}
 	if serverURL != "" {
 		opts = append(opts, slack.OptionAPIURL(serverURL))
 	}
+	opts = append(opts, slack.OptionHTTPClient(&http.Client{Timeout: timeout}))
 	client := slack.New(token, opts...)
 	return &SlackMessenger{client: client, channel: channel}
 }
@@ -43,16 +47,20 @@ func (m *SlackMessenger) Send(message string) error {
 // SlackWebhookMessenger implements the Messenger interface for Slack webhooks
 type SlackWebhookMessenger struct {
 	webhookURL string
+	httpClient *http.Client
 }
 
 // NewSlackWebhookMessenger creates a new SlackWebhookMessenger
-func NewSlackWebhookMessenger(webhookURL string) *SlackWebhookMessenger {
-	return &SlackWebhookMessenger{webhookURL: webhookURL}
+func NewSlackWebhookMessenger(webhookURL string, timeout time.Duration) *SlackWebhookMessenger {
+	return &SlackWebhookMessenger{
+		webhookURL: webhookURL,
+		httpClient: &http.Client{Timeout: timeout},
+	}
 }
 
 // Send sends a message to Slack using a webhook
 func (m *SlackWebhookMessenger) Send(message string) error {
-	err := slack.PostWebhook(m.webhookURL, &slack.WebhookMessage{Text: message})
+	err := slack.PostWebhookCustomHTTP(m.webhookURL, m.httpClient, &slack.WebhookMessage{Text: message})
 	if err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}
