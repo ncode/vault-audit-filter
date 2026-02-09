@@ -36,6 +36,14 @@ type deadLetterTask struct {
 	Reason    string            `json:"reason"`
 }
 
+var marshalPersistedSideTask = func(p persistedSideTask) ([]byte, error) {
+	return json.Marshal(p)
+}
+
+var marshalDeadLetterTask = func(d deadLetterTask) ([]byte, error) {
+	return json.Marshal(d)
+}
+
 func newFileSideTaskStore(baseDir string) (*fileSideTaskStore, error) {
 	pendingDir := filepath.Join(baseDir, "pending")
 	deadDir := filepath.Join(baseDir, "deadletter")
@@ -61,7 +69,7 @@ func (s *fileSideTaskStore) Save(task sideTask) error {
 		Payload:    task.payload,
 		PayloadStr: task.payloadStr,
 	}
-	b, err := json.Marshal(p)
+	b, err := marshalPersistedSideTask(p)
 	if err != nil {
 		return err
 	}
@@ -97,7 +105,7 @@ func (s *fileSideTaskStore) MoveToDeadLetter(task sideTask, reason string) error
 		},
 		Reason: reason,
 	}
-	b, err := json.Marshal(d)
+	b, err := marshalDeadLetterTask(d)
 	if err != nil {
 		return err
 	}

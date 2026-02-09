@@ -1183,6 +1183,12 @@ type dummyForwarder struct {
 	calls      int
 }
 
+type errWriter struct{}
+
+func (e errWriter) Write(_ []byte) (int, error) {
+	return 0, errors.New("write failed")
+}
+
 func (d *dummyForwarder) Forward(_ []byte) error {
 	d.mu.Lock()
 	d.calls++
@@ -1325,6 +1331,196 @@ func TestReact_Branches(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReact_WriteErrorAndLoggerPayloadBranches(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	frame := auditFrame()
+
+	t.Run("writer error branch", func(t *testing.T) {
+		srv := &AuditServer{
+			logger: logger,
+			ruleGroups: []RuleGroup{{
+				Name:          "werr",
+				CompiledRules: nil,
+				Writer:        errWriter{},
+			}},
+			sideQueue: make(chan sideTask, 1),
+		}
+		_, action := srv.React(frame, nil)
+		require.Equal(t, gnet.None, action)
+	})
+
+	t.Run("logger payloadStr branch", func(t *testing.T) {
+		msg := &dummyMessenger{}
+		buf := new(bytes.Buffer)
+		srv := &AuditServer{
+			logger: logger,
+			ruleGroups: []RuleGroup{{
+				Name:          "msg",
+				CompiledRules: nil,
+				Logger:        log.New(buf, "", 0),
+				Writer:        nil,
+				Messenger:     msg,
+			}},
+			sideQueue: make(chan sideTask, 1),
+		}
+		srv.startSideWorkers(1)
+
+		_, action := srv.React(frame, nil)
+		require.Equal(t, gnet.None, action)
+		require.Eventually(t, func() bool { return msg.Calls() == 1 }, time.Second, 10*time.Millisecond)
+		require.Contains(t, buf.String(), string(frame))
+	})
+}
+
+func TestRuleGroup_shouldLog_RuntimeErrorContinues(t *testing.T) {
+	good, err := expr.Compile(`true`, expr.Env(&AuditLog{}))
+	require.NoError(t, err)
+
+	rg := &RuleGroup{CompiledRules: []CompiledRule{{Program: nil}, {Program: good}}}
+	assert.True(t, rg.shouldLog(&AuditLog{}))
+}
+
+func TestNew_AsyncEnqueueModeBlankFallsBackToDrop(t *testing.T) {
+	viper.Reset()
+	viper.Set("rule_groups", []map[string]interface{}{})
+	viper.Set("async.enqueue_mode", "   ")
+
+	server, err := New(nil)
+	require.NoError(t, err)
+	assert.Equal(t, "drop", server.asyncEnqueueMode)
+}
+
+func TestNew_WithSlackMessengerAndDurableEnabled(t *testing.T) {
+	viper.Reset()
+	viper.Set("async.durable.enabled", true)
+	viper.Set("async.durable.dir", t.TempDir())
+	viper.Set("async.timeout", "17ms")
+	viper.Set("rule_groups", []map[string]interface{}{
+		{
+			"name": "slack_group",
+			"rules": []string{
+				"true",
+			},
+			"log_file": map[string]interface{}{
+				"file_path": filepath.Join(t.TempDir(), "slack.log"),
+				"max_size":  1,
+			},
+			"messaging": map[string]interface{}{
+				"type":    "slack",
+				"url":     "https://example.invalid",
+				"token":   "tok",
+				"channel": "chan",
+			},
+		},
+	})
+
+	server, err := New(nil)
+	require.NoError(t, err)
+	require.NotNil(t, server.sideStore)
+	require.True(t, server.asyncDurableEnabled)
+	require.Len(t, server.ruleGroups, 1)
+	require.NotNil(t, server.ruleGroups[0].Messenger)
+}
+
+func TestNew_DurableStoreCreationFailure(t *testing.T) {
+	viper.Reset()
+	viper.Set("async.durable.enabled", true)
+	badBase := filepath.Join(t.TempDir(), "base-file")
+	require.NoError(t, os.WriteFile(badBase, []byte("x"), 0o600))
+	viper.Set("async.durable.dir", badBase)
+	viper.Set("rule_groups", []map[string]interface{}{})
+
+	server, err := New(nil)
+	require.Error(t, err)
+	assert.Nil(t, server)
+	assert.Contains(t, err.Error(), "failed to create durable side task store")
+}
+
+func TestEnqueueSide_WaitMode_DefaultTimeoutBranch(t *testing.T) {
+	as := &AuditServer{
+		sideQueue:           make(chan sideTask, 1),
+		asyncEnqueueMode:    "wait",
+		asyncEnqueueTimeout: 0,
+	}
+	as.sideQueue <- sideTask{}
+
+	start := time.Now()
+	ok := as.enqueueSide(sideTask{})
+	elapsed := time.Since(start)
+
+	assert.False(t, ok)
+	assert.GreaterOrEqual(t, elapsed, 4*time.Millisecond)
+	assert.Equal(t, uint64(1), as.sideDrops.Load())
+}
+
+func TestProcessSideTask_RetrySaveErrorBranch(t *testing.T) {
+	store := &errSideTaskStore{saveErr: errors.New("save failed")}
+	as := &AuditServer{
+		logger:                slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		sideQueue:             make(chan sideTask, 1),
+		asyncDurableEnabled:   true,
+		asyncRetryMaxAttempts: 3,
+		asyncRetryBackoff:     10 * time.Millisecond,
+		sideStore:             store,
+	}
+
+	as.processSideTask(sideTask{
+		id:         "task-r1",
+		groupName:  "g",
+		payload:    []byte("x"),
+		payloadStr: "x",
+		messenger:  &dummyMessenger{sendErr: errors.New("send failed")},
+	})
+}
+
+func TestFileSideTaskStore_PendingReadDirAndReadFileBranches(t *testing.T) {
+	store, err := newFileSideTaskStore(t.TempDir())
+	require.NoError(t, err)
+
+	// cover entries that are directories (continue branch)
+	require.NoError(t, os.Mkdir(filepath.Join(store.pendingDir, "nested"), 0o755))
+	_, err = store.Pending()
+	require.NoError(t, err)
+
+	// cover os.ReadFile error branch using broken symlink
+	symlink := filepath.Join(store.pendingDir, "broken-link.json")
+	require.NoError(t, os.Symlink(filepath.Join(store.pendingDir, "does-not-exist.json"), symlink))
+	_, err = store.Pending()
+	require.Error(t, err)
+
+	// cover os.ReadDir error branch
+	store.pendingDir = filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(store.pendingDir, []byte("x"), 0o600))
+	_, err = store.Pending()
+	require.Error(t, err)
+}
+
+func TestFileSideTaskStore_SaveAndMoveToDeadLetter_MarshalErrorBranches(t *testing.T) {
+	store, err := newFileSideTaskStore(t.TempDir())
+	require.NoError(t, err)
+
+	origPersist := marshalPersistedSideTask
+	origDead := marshalDeadLetterTask
+	t.Cleanup(func() {
+		marshalPersistedSideTask = origPersist
+		marshalDeadLetterTask = origDead
+	})
+
+	marshalPersistedSideTask = func(p persistedSideTask) ([]byte, error) {
+		_ = p
+		return nil, errors.New("marshal persisted failed")
+	}
+	err = store.Save(sideTask{id: "save-1"})
+	require.Error(t, err)
+
+	marshalDeadLetterTask = func(d deadLetterTask) ([]byte, error) {
+		_ = d
+		return nil, errors.New("marshal dead failed")
+	}
+	err = store.MoveToDeadLetter(sideTask{id: "dead-1"}, "reason")
+	require.Error(t, err)
 }
 
 type errSideTaskStore struct {
