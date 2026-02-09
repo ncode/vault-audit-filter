@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -375,8 +376,22 @@ func TestNew_AsyncDefaults(t *testing.T) {
 	server, err := New(nil)
 	require.NoError(t, err)
 	require.NotNil(t, server)
+	assert.Equal(t, "drop", server.asyncEnqueueMode)
+	assert.Equal(t, 5*time.Millisecond, server.asyncEnqueueTimeout)
+	assert.Equal(t, 2, server.asyncWorkers)
 	assert.Equal(t, 20, server.asyncQueueSize)
 	assert.Equal(t, 5*time.Second, server.asyncTimeout)
+}
+
+func TestNew_InvalidEnqueueModeFallsBackToDrop(t *testing.T) {
+	viper.Reset()
+	viper.Set("async.enqueue_mode", "invalid")
+	viper.Set("async.enqueue_timeout", "12ms")
+
+	server, err := New(nil)
+	require.NoError(t, err)
+	assert.Equal(t, "drop", server.asyncEnqueueMode)
+	assert.Equal(t, 12*time.Millisecond, server.asyncEnqueueTimeout)
 }
 
 func TestSideQueue_DropsWhenFull(t *testing.T) {
@@ -443,6 +458,234 @@ func TestReact_AsyncMessengerCalled(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatalf("messenger not called")
 	}
+}
+
+func TestNew_AsyncWorkersCanBeDisabled(t *testing.T) {
+	viper.Reset()
+	viper.Set("async.queue_size", 10)
+	viper.Set("async.workers", 0)
+	viper.Set("rule_groups", []map[string]interface{}{
+		{
+			"name":     "rg",
+			"rules":    []string{"true"},
+			"log_file": map[string]interface{}{"file_path": "/tmp/test.log", "max_size": 1},
+			"messaging": map[string]interface{}{
+				"type":        "slack_webhook",
+				"webhook_url": "http://example.com",
+			},
+		},
+	})
+
+	srv, err := New(nil)
+	require.NoError(t, err)
+
+	called := make(chan struct{}, 1)
+	for i := range srv.ruleGroups {
+		srv.ruleGroups[i].Messenger = &MockMessenger{SendFunc: func(string) error {
+			called <- struct{}{}
+			return nil
+		}}
+	}
+
+	frame := []byte(`{"type":"request","time":"2000-01-01T00:00:00Z","auth":{},"request":{},"response":{}}`)
+	_, action := srv.React(frame, nil)
+	assert.Equal(t, gnet.None, action)
+
+	select {
+	case <-called:
+		t.Fatalf("messenger should not be called when async.workers=0")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestNew_AsyncWorkersCanOverrideDefault(t *testing.T) {
+	viper.Reset()
+	viper.Set("async.queue_size", 10)
+	viper.Set("async.workers", 1)
+	viper.Set("rule_groups", []map[string]interface{}{
+		{
+			"name":     "rg",
+			"rules":    []string{"true"},
+			"log_file": map[string]interface{}{"file_path": "/tmp/test.log", "max_size": 1},
+			"messaging": map[string]interface{}{
+				"type":        "slack_webhook",
+				"webhook_url": "http://example.com",
+			},
+		},
+	})
+
+	oldWorkers := defaultSideWorkers
+	defaultSideWorkers = 0
+	defer func() { defaultSideWorkers = oldWorkers }()
+
+	srv, err := New(nil)
+	require.NoError(t, err)
+
+	called := make(chan struct{}, 1)
+	for i := range srv.ruleGroups {
+		srv.ruleGroups[i].Messenger = &MockMessenger{SendFunc: func(string) error {
+			called <- struct{}{}
+			return nil
+		}}
+	}
+
+	frame := []byte(`{"type":"request","time":"2000-01-01T00:00:00Z","auth":{},"request":{},"response":{}}`)
+	_, action := srv.React(frame, nil)
+	assert.Equal(t, gnet.None, action)
+
+	select {
+	case <-called:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("messenger should be called when async.workers=1")
+	}
+}
+
+func TestEnqueueSide_DropMode_DropsImmediatelyWhenFull(t *testing.T) {
+	as := &AuditServer{
+		sideQueue: make(chan sideTask, 1),
+	}
+	as.sideQueue <- sideTask{}
+
+	start := time.Now()
+	ok := as.enqueueSide(sideTask{})
+	elapsed := time.Since(start)
+
+	assert.False(t, ok)
+	assert.Equal(t, uint64(1), as.sideDrops.Load())
+	assert.Less(t, elapsed, 10*time.Millisecond)
+}
+
+func TestEnqueueSide_WaitMode_TimesOutWhenFull(t *testing.T) {
+	as := &AuditServer{
+		sideQueue:           make(chan sideTask, 1),
+		asyncEnqueueMode:    "wait",
+		asyncEnqueueTimeout: 30 * time.Millisecond,
+	}
+	as.sideQueue <- sideTask{}
+
+	start := time.Now()
+	ok := as.enqueueSide(sideTask{})
+	elapsed := time.Since(start)
+
+	assert.False(t, ok)
+	assert.Equal(t, uint64(1), as.sideDrops.Load())
+	assert.GreaterOrEqual(t, elapsed, 25*time.Millisecond)
+}
+
+func TestEnqueueSide_WaitMode_EnqueuesWhenCapacityFrees(t *testing.T) {
+	as := &AuditServer{
+		sideQueue:           make(chan sideTask, 1),
+		asyncEnqueueMode:    "wait",
+		asyncEnqueueTimeout: 200 * time.Millisecond,
+	}
+	as.sideQueue <- sideTask{}
+
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		<-as.sideQueue
+	}()
+
+	start := time.Now()
+	ok := as.enqueueSide(sideTask{})
+	elapsed := time.Since(start)
+
+	assert.True(t, ok)
+	assert.Equal(t, uint64(0), as.sideDrops.Load())
+	assert.GreaterOrEqual(t, elapsed, 20*time.Millisecond)
+	assert.Less(t, elapsed, 200*time.Millisecond)
+}
+
+func TestEnqueueSide_DurableMode_PersistsWhenQueueFull(t *testing.T) {
+	store, err := newFileSideTaskStore(t.TempDir())
+	require.NoError(t, err)
+
+	as := &AuditServer{
+		logger:              slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		sideQueue:           make(chan sideTask, 1),
+		asyncDurableEnabled: true,
+		asyncRetryBackoff:   20 * time.Millisecond,
+		sideStore:           store,
+	}
+	as.sideQueue <- sideTask{}
+
+	ok := as.enqueueSide(sideTask{groupName: "g", payload: []byte("x"), payloadStr: "x"})
+	require.True(t, ok)
+	assert.Equal(t, uint64(0), as.sideDrops.Load())
+
+	tasks, err := as.sideStore.Pending()
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+}
+
+func TestProcessSideTask_DurableRetryToDeadLetter(t *testing.T) {
+	store, err := newFileSideTaskStore(t.TempDir())
+	require.NoError(t, err)
+
+	as := &AuditServer{
+		logger:                slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		sideQueue:             make(chan sideTask, 8),
+		asyncDurableEnabled:   true,
+		asyncRetryMaxAttempts: 2,
+		asyncRetryBackoff:     20 * time.Millisecond,
+		sideStore:             store,
+	}
+	as.startSideWorkers(1)
+
+	task := sideTask{
+		id:         "task-1",
+		groupName:  "g",
+		payload:    []byte("x"),
+		payloadStr: "x",
+		messenger:  &dummyMessenger{sendErr: errors.New("boom")},
+	}
+	require.NoError(t, as.sideStore.Save(task))
+
+	as.processSideTask(task)
+
+	require.Eventually(t, func() bool {
+		pending, err := as.sideStore.Pending()
+		if err != nil {
+			return false
+		}
+		if len(pending) != 0 {
+			return false
+		}
+		_, err = os.Stat(filepath.Join(store.deadDir, "task-1.json"))
+		return err == nil
+	}, 2*time.Second, 25*time.Millisecond)
+}
+
+func TestReplayDurablePending_ReplaysStoredTasks(t *testing.T) {
+	store, err := newFileSideTaskStore(t.TempDir())
+	require.NoError(t, err)
+
+	msg := &dummyMessenger{}
+	as := &AuditServer{
+		logger:                slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		sideQueue:             make(chan sideTask, 8),
+		asyncDurableEnabled:   true,
+		asyncRetryMaxAttempts: 2,
+		asyncRetryBackoff:     10 * time.Millisecond,
+		sideStore:             store,
+		ruleGroups: []RuleGroup{{
+			Name:      "g",
+			Messenger: msg,
+		}},
+	}
+	as.startSideWorkers(1)
+
+	require.NoError(t, as.sideStore.Save(sideTask{id: "task-a", groupName: "g", payload: []byte("a"), payloadStr: "a"}))
+	require.NoError(t, as.sideStore.Save(sideTask{id: "task-b", groupName: "g", payload: []byte("b"), payloadStr: "b"}))
+
+	as.replayDurablePending()
+
+	require.Eventually(t, func() bool {
+		return msg.Calls() == 2
+	}, 2*time.Second, 25*time.Millisecond)
+
+	pending, err := as.sideStore.Pending()
+	require.NoError(t, err)
+	assert.Len(t, pending, 0)
 }
 
 func TestNewWithoutLogger(t *testing.T) {
@@ -1057,9 +1300,9 @@ func TestReact_Branches(t *testing.T) {
 		tc := tc // capture range variable
 		t.Run(tc.name, func(t *testing.T) {
 			srv := &AuditServer{
-				logger:    logger,
+				logger:     logger,
 				ruleGroups: []RuleGroup{tc.group},
-				sideQueue: make(chan sideTask, 2),
+				sideQueue:  make(chan sideTask, 2),
 			}
 			srv.startSideWorkers(1)
 

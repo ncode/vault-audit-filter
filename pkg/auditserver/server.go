@@ -7,6 +7,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -130,12 +131,21 @@ type LogFileConfig struct {
 
 type AuditServer struct {
 	*gnet.EventServer
-	logger         *slog.Logger
-	ruleGroups     []RuleGroup
-	sideQueue      chan sideTask
-	sideDrops      atomic.Uint64
-	asyncQueueSize int
-	asyncTimeout   time.Duration
+	logger                *slog.Logger
+	ruleGroups            []RuleGroup
+	sideQueue             chan sideTask
+	sideDrops             atomic.Uint64
+	asyncEnqueueMode      string
+	asyncEnqueueTimeout   time.Duration
+	asyncWorkers          int
+	asyncQueueSize        int
+	asyncTimeout          time.Duration
+	asyncDurableEnabled   bool
+	asyncDurableDir       string
+	asyncRetryMaxAttempts int
+	asyncRetryBackoff     time.Duration
+	sideStore             sideTaskStore
+	sideTaskSeq           atomic.Uint64
 }
 
 func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet.Action) {
@@ -172,6 +182,7 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 					payloadStrReady = true
 				}
 				_ = as.enqueueSide(sideTask{
+					groupName:  rg.Name,
 					payload:    payload,
 					payloadStr: payloadStr,
 					messenger:  rg.Messenger,
@@ -226,17 +237,57 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 	}
 
 	viper.SetDefault("async.queue_size", 20)
+	viper.SetDefault("async.workers", defaultSideWorkers)
+	viper.SetDefault("async.enqueue_mode", "drop")
+	viper.SetDefault("async.enqueue_timeout", "5ms")
 	viper.SetDefault("async.timeout", "5s")
+	viper.SetDefault("async.durable.enabled", false)
+	viper.SetDefault("async.durable.dir", "./.vault-audit-filter-sideeffects")
+	viper.SetDefault("async.retry.max_attempts", 3)
+	viper.SetDefault("async.retry.backoff", "100ms")
 
 	queueSize := viper.GetInt("async.queue_size")
 	if queueSize <= 0 {
 		queueSize = 20
+	}
+	workers := viper.GetInt("async.workers")
+	if workers < 0 {
+		workers = defaultSideWorkers
+	}
+	enqueueMode := strings.ToLower(strings.TrimSpace(viper.GetString("async.enqueue_mode")))
+	if enqueueMode == "" {
+		enqueueMode = "drop"
+	}
+	if enqueueMode != "drop" && enqueueMode != "wait" {
+		logger.Warn("Invalid async.enqueue_mode; using default", "value", enqueueMode)
+		enqueueMode = "drop"
+	}
+	rawEnqueueTimeout := viper.GetString("async.enqueue_timeout")
+	enqueueTimeout, err := time.ParseDuration(rawEnqueueTimeout)
+	if err != nil || enqueueTimeout <= 0 {
+		enqueueTimeout = 5 * time.Millisecond
+		logger.Warn("Invalid async.enqueue_timeout; using default", "value", rawEnqueueTimeout)
 	}
 	rawTimeout := viper.GetString("async.timeout")
 	asyncTimeout, err := time.ParseDuration(rawTimeout)
 	if err != nil {
 		asyncTimeout = 5 * time.Second
 		logger.Warn("Invalid async.timeout; using default", "value", rawTimeout)
+	}
+	durableEnabled := viper.GetBool("async.durable.enabled")
+	durableDir := strings.TrimSpace(viper.GetString("async.durable.dir"))
+	if durableDir == "" {
+		durableDir = "./.vault-audit-filter-sideeffects"
+	}
+	retryMaxAttempts := viper.GetInt("async.retry.max_attempts")
+	if retryMaxAttempts <= 0 {
+		retryMaxAttempts = 3
+	}
+	rawRetryBackoff := viper.GetString("async.retry.backoff")
+	retryBackoff, err := time.ParseDuration(rawRetryBackoff)
+	if err != nil || retryBackoff <= 0 {
+		retryBackoff = 100 * time.Millisecond
+		logger.Warn("Invalid async.retry.backoff; using default", "value", rawRetryBackoff)
 	}
 
 	// Load rule groups from configuration
@@ -256,73 +307,90 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 		})
 	} else {
 		for _, rgConfig := range ruleGroupConfigs {
-		// Compile rules
-		var compiledRules []CompiledRule
-		for _, ruleStr := range rgConfig.Rules {
-			program, err := expr.Compile(ruleStr, expr.Env(&AuditLog{}))
-			if err != nil {
-				logger.Error("Failed to compile rule", "rule", ruleStr, "error", err)
-				continue
+			// Compile rules
+			var compiledRules []CompiledRule
+			for _, ruleStr := range rgConfig.Rules {
+				program, err := expr.Compile(ruleStr, expr.Env(&AuditLog{}))
+				if err != nil {
+					logger.Error("Failed to compile rule", "rule", ruleStr, "error", err)
+					continue
+				}
+				compiledRules = append(compiledRules, CompiledRule{Program: program})
 			}
-			compiledRules = append(compiledRules, CompiledRule{Program: program})
-		}
 
-		// Logger for group
-		logFileCfg := rgConfig.LogFile
-		logFile := &lumberjack.Logger{
-			Filename:   logFileCfg.FilePath,
-			MaxSize:    logFileCfg.MaxSize,
-			MaxBackups: logFileCfg.MaxBackups,
-			MaxAge:     logFileCfg.MaxAge,
-			Compress:   logFileCfg.Compress,
-		}
-		groupLogger := log.New(logFile, "", 0)
-
-		// Messenger
-		var messenger messaging.Messenger
-		switch rgConfig.Messaging.Type {
-		case "slack":
-			messenger = messaging.NewSlackMessenger(rgConfig.Messaging.URL, rgConfig.Messaging.Token, rgConfig.Messaging.Channel, asyncTimeout)
-		case "slack_webhook":
-			messenger = messaging.NewSlackWebhookMessenger(rgConfig.Messaging.WebhookURL, asyncTimeout)
-		default:
-			if rgConfig.Messaging.Type != "" {
-				logger.Error("Invalid messenger type", "type", rgConfig.Messaging.Type)
+			// Logger for group
+			logFileCfg := rgConfig.LogFile
+			logFile := &lumberjack.Logger{
+				Filename:   logFileCfg.FilePath,
+				MaxSize:    logFileCfg.MaxSize,
+				MaxBackups: logFileCfg.MaxBackups,
+				MaxAge:     logFileCfg.MaxAge,
+				Compress:   logFileCfg.Compress,
 			}
-		}
+			groupLogger := log.New(logFile, "", 0)
 
-		// Forwarder
-		var fwd forwarder.Forwarder
-		if rgConfig.Forwarding.Enabled {
-			var err error
-			fwd, err = forwarder.NewUDPForwarder(rgConfig.Forwarding.Address)
-			if err != nil {
-				logger.Error("Failed to create UDP forwarder", "error", err)
-				return nil, fmt.Errorf("failed to create UDP forwarder: %w", err)
+			// Messenger
+			var messenger messaging.Messenger
+			switch rgConfig.Messaging.Type {
+			case "slack":
+				messenger = messaging.NewSlackMessenger(rgConfig.Messaging.URL, rgConfig.Messaging.Token, rgConfig.Messaging.Channel, asyncTimeout)
+			case "slack_webhook":
+				messenger = messaging.NewSlackWebhookMessenger(rgConfig.Messaging.WebhookURL, asyncTimeout)
+			default:
+				if rgConfig.Messaging.Type != "" {
+					logger.Error("Invalid messenger type", "type", rgConfig.Messaging.Type)
+				}
 			}
-			if udpFwd, ok := fwd.(*forwarder.UDPForwarder); ok {
-				udpFwd.SetTimeout(asyncTimeout)
-			}
-		}
 
-		ruleGroups = append(ruleGroups, RuleGroup{
-			Name:          rgConfig.Name,
-			CompiledRules: compiledRules,
-			Logger:        groupLogger,
-			Writer:        logFile,
-			Messenger:     messenger,
-			Forwarder:     fwd,
-		})
-	}
+			// Forwarder
+			var fwd forwarder.Forwarder
+			if rgConfig.Forwarding.Enabled {
+				var err error
+				fwd, err = forwarder.NewUDPForwarder(rgConfig.Forwarding.Address)
+				if err != nil {
+					logger.Error("Failed to create UDP forwarder", "error", err)
+					return nil, fmt.Errorf("failed to create UDP forwarder: %w", err)
+				}
+				if udpFwd, ok := fwd.(*forwarder.UDPForwarder); ok {
+					udpFwd.SetTimeout(asyncTimeout)
+				}
+			}
+
+			ruleGroups = append(ruleGroups, RuleGroup{
+				Name:          rgConfig.Name,
+				CompiledRules: compiledRules,
+				Logger:        groupLogger,
+				Writer:        logFile,
+				Messenger:     messenger,
+				Forwarder:     fwd,
+			})
+		}
 	}
 
 	server := &AuditServer{
-		logger:         logger,
-		ruleGroups:     ruleGroups,
-		sideQueue:      make(chan sideTask, queueSize),
-		asyncQueueSize: queueSize,
-		asyncTimeout:   asyncTimeout,
+		logger:                logger,
+		ruleGroups:            ruleGroups,
+		sideQueue:             make(chan sideTask, queueSize),
+		asyncEnqueueMode:      enqueueMode,
+		asyncEnqueueTimeout:   enqueueTimeout,
+		asyncWorkers:          workers,
+		asyncQueueSize:        queueSize,
+		asyncTimeout:          asyncTimeout,
+		asyncDurableEnabled:   durableEnabled,
+		asyncDurableDir:       durableDir,
+		asyncRetryMaxAttempts: retryMaxAttempts,
+		asyncRetryBackoff:     retryBackoff,
 	}
-	server.startSideWorkers(defaultSideWorkers)
+	if durableEnabled {
+		store, err := newFileSideTaskStore(durableDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create durable side task store: %w", err)
+		}
+		server.sideStore = store
+	}
+	server.startSideWorkers(workers)
+	if durableEnabled {
+		server.replayDurablePending()
+	}
 	return server, nil
 }

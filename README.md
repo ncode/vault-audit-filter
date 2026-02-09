@@ -70,6 +70,7 @@ Once you have built the project, you can run the `vault-audit-filter` executable
 
     async:
       queue_size: 20
+      workers: 2
       timeout: 5s
 
     rule_groups:
@@ -135,7 +136,61 @@ Once you have built the project, you can run the `vault-audit-filter` executable
 
   - **Async Settings**:
   - `async.queue_size`: Bounded queue length for async side effects (drop on full).
+  - `async.workers`: Number of async side-effect workers (`0` disables worker execution).
   - `async.timeout`: Timeout for Slack API/webhook and forwarding operations.
+
+### Async Tuning Profiles
+
+Use these as baseline profiles and tune from there:
+
+| Profile | `async.queue_size` | `async.workers` | `async.timeout` | Expected Behavior |
+| --- | ---: | ---: | --- | --- |
+| Latency-first (default) | 20 | 2 | 5s | Lowest request latency; highest drop risk during bursts |
+| Balanced | 256 | 8 | 5s | Low request latency with lower drop rate than default |
+| Throughput-biased | 1024 | 16 | 5s | Low request latency with significantly fewer drops; higher CPU/memory usage |
+
+Representative stress-test results (2000 requests, concurrency 64, slow downstream side effects):
+
+| Config | Downstream Delay | Request Avg | Request P95 | Inferred Drops |
+| --- | ---: | ---: | ---: | ---: |
+| Sync (`main`) | 20ms | 21.0ms | 21.4ms | 0 |
+| Async `q=64,w=2` | 20ms | 0.30ms | 1.06ms | 1934/2000 |
+| Async `q=256,w=8` | 20ms | 0.34ms | 1.39ms | 1736/2000 |
+| Async `q=1024,w=16` | 20ms | 0.37ms | 1.80ms | 960/2000 |
+
+Interpretation:
+- Current async design is appropriate when request-path latency protection is the top priority.
+- If side-effect delivery reliability is required, increase queue/workers and monitor drops, or move to a durable retry design.
+
+### Performance Findings and Decision
+
+Performance findings from the latest comparison are:
+- Synchronous mode (`main`) preserves side-effect delivery in the test scenario, but request latency tracks downstream delay (about 21ms average at 20ms downstream delay).
+- Asynchronous mode keeps request latency low (sub-millisecond average in measured scenarios), but can drop a large fraction of side effects during bursts depending on queue/workers settings.
+
+Caveats:
+- The numbers above come from synthetic stress tests (2000 requests, concurrency 64) and are intended as directional guidance.
+- Real production behavior depends on traffic burst shape, downstream service health, and host resource limits.
+
+Current decision:
+- Operate in latency-first async mode by default.
+- Treat side effects as best-effort unless deployment requirements explicitly demand stronger delivery guarantees.
+
+When durable/retry work is needed:
+- Side-effect drops remain sustained and unacceptable after tuning `async.workers` and `async.queue_size`.
+- Audit/operational requirements require stronger guarantees than best-effort delivery.
+
+Follow-up options:
+1. Add bounded blocking enqueue mode to trade some request latency for fewer drops.
+2. Add durable retry and dead-letter flow for stronger side-effect delivery guarantees.
+3. Re-run workload-specific tuning tests and adjust profile recommendations.
+
+Tuning checklist:
+1. Start with `Latency-first` or `Balanced`.
+2. Monitor side-effect drop count and request tail latency.
+3. If drops are sustained and unacceptable, raise `async.workers` first, then `async.queue_size`.
+4. If request tail latency regresses, reduce workers or move to a balanced profile.
+5. If drops remain unacceptable, adopt durable retry architecture rather than unbounded tuning.
 
 ### Rule Syntax
 
