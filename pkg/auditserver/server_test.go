@@ -1176,6 +1176,19 @@ func (d *dummyForwarder) Calls() int {
 	return d.calls
 }
 
+type fakeTrafficConn struct {
+	gnet.Conn
+	frame []byte
+	err   error
+}
+
+func (c *fakeTrafficConn) Next(_ int) ([]byte, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.frame, nil
+}
+
 // minimal JSON frame that parses into an AuditLog
 func auditFrame() []byte {
 	return []byte(`{"type":"request","time":"2000-01-01T00:00:00Z","auth":{},"request":{},"response":{}}`)
@@ -1659,4 +1672,25 @@ func TestReplayDurablePending_NoStoreOrPendingError(t *testing.T) {
 		sideStore: &errSideTaskStore{pendingErr: errors.New("boom")},
 	}
 	asErr.replayDurablePending()
+}
+
+func TestOnTraffic(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	t.Run("returns_close_when_next_fails", func(t *testing.T) {
+		srv := &AuditServer{logger: logger}
+		action := srv.OnTraffic(&fakeTrafficConn{err: errors.New("read failed")})
+		require.Equal(t, gnet.Close, action)
+	})
+
+	t.Run("passes_frame_to_handler", func(t *testing.T) {
+		srv := &AuditServer{
+			logger:     logger,
+			ruleGroups: []RuleGroup{{Name: "always", Writer: new(bytes.Buffer)}},
+			sideQueue:  make(chan sideTask, 1),
+		}
+
+		action := srv.OnTraffic(&fakeTrafficConn{frame: auditFrame()})
+		require.Equal(t, gnet.None, action)
+	})
 }
