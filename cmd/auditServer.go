@@ -19,7 +19,7 @@ import (
 	"fmt"
 
 	"github.com/ncode/vault-audit-filter/pkg/auditserver"
-	"github.com/panjf2000/gnet"
+	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -35,7 +35,7 @@ var auditServerCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to create audit server: %w", err)
 		}
-		return gnet.Serve(server, addr, gnet.WithMulticore(true))
+		return gnet.Run(server, addr, gnet.WithMulticore(true))
 	},
 }
 

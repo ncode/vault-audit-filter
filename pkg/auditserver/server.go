@@ -16,7 +16,7 @@ import (
 	"github.com/expr-lang/expr/vm"
 	"github.com/ncode/vault-audit-filter/pkg/forwarder"
 	"github.com/ncode/vault-audit-filter/pkg/messaging"
-	"github.com/panjf2000/gnet"
+	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/viper"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -130,7 +130,7 @@ type LogFileConfig struct {
 }
 
 type AuditServer struct {
-	*gnet.EventServer
+	*gnet.BuiltinEventEngine
 	logger                *slog.Logger
 	ruleGroups            []RuleGroup
 	sideQueue             chan sideTask
@@ -148,7 +148,7 @@ type AuditServer struct {
 	sideTaskSeq           atomic.Uint64
 }
 
-func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet.Action) {
+func (as *AuditServer) handleFrame(frame []byte) gnet.Action {
 	// Parse the audit log for rule evaluation
 	auditLog := auditLogPool.Get().(*AuditLog)
 	*auditLog = AuditLog{} // reset pooled object
@@ -157,7 +157,7 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 	if err != nil {
 		as.logger.Error("Error parsing audit log", "error", err)
 		auditLogPool.Put(auditLog)
-		return nil, gnet.Close
+		return gnet.Close
 	}
 
 	matched := false
@@ -210,9 +210,22 @@ func (as *AuditServer) React(frame []byte, c gnet.Conn) (out []byte, action gnet
 	auditLogPool.Put(auditLog)
 
 	if !matched {
-		return nil, gnet.Close
+		return gnet.Close
 	}
-	return nil, gnet.None
+	return gnet.None
+}
+
+func (as *AuditServer) React(frame []byte, _ gnet.Conn) (out []byte, action gnet.Action) {
+	return nil, as.handleFrame(frame)
+}
+
+func (as *AuditServer) OnTraffic(c gnet.Conn) (action gnet.Action) {
+	frame, err := c.Next(-1)
+	if err != nil {
+		as.logger.Error("Error reading frame", "error", err)
+		return gnet.Close
+	}
+	return as.handleFrame(frame)
 }
 
 func (rg *RuleGroup) shouldLog(auditLog *AuditLog) bool {

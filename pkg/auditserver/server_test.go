@@ -10,7 +10,6 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,7 +22,7 @@ import (
 	"log/slog"
 
 	"github.com/expr-lang/expr"
-	"github.com/panjf2000/gnet"
+	"github.com/panjf2000/gnet/v2"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -77,31 +76,6 @@ func (b *lockedBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
-
-// mockConn is a mock implementation of gnet.Conn
-type mockConn struct{}
-
-func (m *mockConn) Read() []byte                        { return nil }
-func (m *mockConn) ReadN(n int) (int, []byte)           { return 0, nil }
-func (m *mockConn) Write(b []byte) (n int, err error)   { return 0, nil }
-func (m *mockConn) Close() error                        { return nil }
-func (m *mockConn) LocalAddr() net.Addr                 { return nil }
-func (m *mockConn) RemoteAddr() net.Addr                { return nil }
-func (m *mockConn) Context() interface{}                { return nil }
-func (m *mockConn) SetContext(ctx interface{})          {}
-func (m *mockConn) Wake() error                         { return nil }
-func (m *mockConn) ResetBuffer()                        {}
-func (m *mockConn) ReadBytes() []byte                   { return nil }
-func (m *mockConn) ShiftN(n int) (size int)             { return 0 }
-func (m *mockConn) InboundBuffer() *bytes.Buffer        { return nil }
-func (m *mockConn) OutboundBuffer() *bytes.Buffer       { return nil }
-func (m *mockConn) AsyncWrite(buf []byte) (err error)   { return nil }
-func (m *mockConn) AsyncWritev(bs [][]byte) (err error) { return nil }
-func (m *mockConn) SendTo(buf []byte) (err error)       { return nil }
-func (m *mockConn) WriteFrame(buf []byte) (err error)   { return nil }
-func (m *mockConn) BufferLength() int                   { return 0 }
-func (m *mockConn) Peek(n int) (buf []byte, err error)  { return nil, nil }
-func (m *mockConn) Next(n int) (buf []byte, err error)  { return nil, nil }
 
 func TestAuditServer_React(t *testing.T) {
 	// Create a temporary directory for log files
@@ -248,7 +222,7 @@ func TestAuditServer_React(t *testing.T) {
 			}
 
 			// Call React
-			_, action := as.React(frame, &mockConn{})
+			_, action := as.React(frame, nil)
 
 			if action != tt.expectAction {
 				t.Errorf("Expected action %v, got %v", tt.expectAction, action)
@@ -1107,7 +1081,7 @@ func TestAuditServer_React_WithForwarding(t *testing.T) {
 			mockForwarder2.On("Forward", frame).Return(nil).Maybe()
 
 			// Call React
-			_, action := as.React(frame, &mockConn{})
+			_, action := as.React(frame, nil)
 
 			assert.Equal(t, tc.expectAction, action)
 
@@ -1200,6 +1174,19 @@ func (d *dummyForwarder) Calls() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.calls
+}
+
+type fakeTrafficConn struct {
+	gnet.Conn
+	frame []byte
+	err   error
+}
+
+func (c *fakeTrafficConn) Next(_ int) ([]byte, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.frame, nil
 }
 
 // minimal JSON frame that parses into an AuditLog
@@ -1685,4 +1672,25 @@ func TestReplayDurablePending_NoStoreOrPendingError(t *testing.T) {
 		sideStore: &errSideTaskStore{pendingErr: errors.New("boom")},
 	}
 	asErr.replayDurablePending()
+}
+
+func TestOnTraffic(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	t.Run("returns_close_when_next_fails", func(t *testing.T) {
+		srv := &AuditServer{logger: logger}
+		action := srv.OnTraffic(&fakeTrafficConn{err: errors.New("read failed")})
+		require.Equal(t, gnet.Close, action)
+	})
+
+	t.Run("passes_frame_to_handler", func(t *testing.T) {
+		srv := &AuditServer{
+			logger:     logger,
+			ruleGroups: []RuleGroup{{Name: "always", Writer: new(bytes.Buffer)}},
+			sideQueue:  make(chan sideTask, 1),
+		}
+
+		action := srv.OnTraffic(&fakeTrafficConn{frame: auditFrame()})
+		require.Equal(t, gnet.None, action)
+	})
 }

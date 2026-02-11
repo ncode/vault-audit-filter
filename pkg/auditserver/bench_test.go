@@ -14,7 +14,7 @@ func BenchmarkReact(b *testing.B) {
 	viper.Reset()
 	viper.Set("rule_groups", []map[string]interface{}{
 		{
-			"name": "rg",
+			"name":  "rg",
 			"rules": []string{"true"},
 			"log_file": map[string]interface{}{
 				"file_path": "/tmp/test.log",

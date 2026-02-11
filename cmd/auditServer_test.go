@@ -54,3 +54,12 @@ func TestAuditServerCmd_ValidConfig(t *testing.T) {
 	assert.Equal(t, "auditServer", auditServerCmd.Use)
 	assert.NotNil(t, auditServerCmd.RunE)
 }
+
+func TestAuditServerCmd_RunE_InvokesGnetRun(t *testing.T) {
+	viper.Reset()
+	viper.Set("vault.audit_address", "bad host")
+	viper.Set("rule_groups", []map[string]interface{}{})
+
+	err := auditServerCmd.RunE(auditServerCmd, []string{})
+	assert.Error(t, err)
+}
