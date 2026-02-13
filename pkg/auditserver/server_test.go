@@ -1180,6 +1180,7 @@ type fakeTrafficConn struct {
 	gnet.Conn
 	frame []byte
 	err   error
+	ctx   any
 }
 
 func (c *fakeTrafficConn) Next(_ int) ([]byte, error) {
@@ -1187,6 +1188,14 @@ func (c *fakeTrafficConn) Next(_ int) ([]byte, error) {
 		return nil, c.err
 	}
 	return c.frame, nil
+}
+
+func (c *fakeTrafficConn) Context() any {
+	return c.ctx
+}
+
+func (c *fakeTrafficConn) SetContext(ctx any) {
+	c.ctx = ctx
 }
 
 // minimal JSON frame that parses into an AuditLog
@@ -1367,6 +1376,58 @@ func TestRuleGroup_shouldLog_RuntimeErrorContinues(t *testing.T) {
 
 	rg := &RuleGroup{CompiledRules: []CompiledRule{{Program: nil}, {Program: good}}}
 	assert.True(t, rg.shouldLog(&AuditLog{}))
+}
+
+func TestAuditServer_HandleTCPStream(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	writer := new(bytes.Buffer)
+
+	as := &AuditServer{
+		logger: logger,
+		ruleGroups: []RuleGroup{
+			{Name: "default", Writer: writer},
+		},
+	}
+
+	stream := []byte(string(auditFrame()) + "\n" + string(auditFrame()) + "\r\n")
+	remaining := as.handleTCPStream(stream, nil)
+	require.Empty(t, remaining)
+
+	frameText := string(auditFrame())
+	assert.Equal(t, 2, strings.Count(writer.String(), frameText))
+
+	// split frame across reads and validate carryover behavior
+	full := string(auditFrame())
+	mid := len(full) / 2
+	carry := as.handleTCPStream([]byte(full[:mid]), nil)
+	require.NotEmpty(t, carry)
+
+	carry = as.handleTCPStream([]byte(full[mid:]+"\n"), carry)
+	require.Empty(t, carry)
+
+	assert.Equal(t, 3, strings.Count(writer.String(), frameText))
+}
+
+func TestNew_AuditTransportConfiguration(t *testing.T) {
+	viper.Reset()
+	server, err := New(nil)
+	require.NoError(t, err)
+	assert.Equal(t, "udp", server.auditTransport)
+
+	viper.Reset()
+	viper.Set("vault.audit_protocol", "tcp")
+	server, err = New(nil)
+	require.NoError(t, err)
+	assert.Equal(t, "tcp", server.auditTransport)
+
+	viper.Reset()
+	viper.Set("vault.audit_protocol", "invalid")
+	logBuffer := new(bytes.Buffer)
+	logger := slog.New(slog.NewTextHandler(logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	server, err = New(logger)
+	require.NoError(t, err)
+	assert.Equal(t, "udp", server.auditTransport)
+	assert.Contains(t, logBuffer.String(), "Invalid vault.audit_protocol")
 }
 
 func TestNew_AsyncEnqueueModeBlankFallsBackToDrop(t *testing.T) {
@@ -1692,5 +1753,57 @@ func TestOnTraffic(t *testing.T) {
 
 		action := srv.OnTraffic(&fakeTrafficConn{frame: auditFrame()})
 		require.Equal(t, gnet.None, action)
+	})
+}
+
+func TestOnTraffic_TCP(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	t.Run("complete frames clear context", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		srv := &AuditServer{
+			logger:         logger,
+			auditTransport: "tcp",
+			ruleGroups:     []RuleGroup{{Name: "all", CompiledRules: nil, Writer: buf}},
+			sideQueue:      make(chan sideTask, 1),
+		}
+
+		stream := append(auditFrame(), '\n')
+		stream = append(stream, auditFrame()...)
+		stream = append(stream, '\r', '\n')
+
+		conn := &fakeTrafficConn{frame: stream}
+		action := srv.OnTraffic(conn)
+
+		require.Equal(t, gnet.None, action)
+		require.NoError(t, conn.err)
+		require.Nil(t, conn.Context())
+		assert.Equal(t, 2, strings.Count(buf.String(), string(auditFrame())))
+	})
+
+	t.Run("partial frame keeps context", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		srv := &AuditServer{
+			logger:         logger,
+			auditTransport: "tcp",
+			ruleGroups:     []RuleGroup{{Name: "all", CompiledRules: nil, Writer: buf}},
+			sideQueue:      make(chan sideTask, 1),
+		}
+
+		line := auditFrame()
+		half := len(line) / 2
+		conn := &fakeTrafficConn{
+			ctx:   append([]byte(nil), line[:half]...),
+			frame: append(append([]byte(nil), line[half:]...), '\n'),
+		}
+		conn.frame = append(conn.frame, line...)
+
+		action := srv.OnTraffic(conn)
+
+		require.Equal(t, gnet.None, action)
+		remaining, ok := conn.Context().([]byte)
+		require.True(t, ok)
+		assert.Equal(t, line, remaining)
+		assert.Equal(t, 1, strings.Count(buf.String(), string(line)))
 	})
 }

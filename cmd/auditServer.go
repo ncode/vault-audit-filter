@@ -28,15 +28,27 @@ import (
 var auditServerCmd = &cobra.Command{
 	Use:   "auditServer",
 	Short: "Start the audit server to receive and filter Vault audit logs",
-	Long:  `Starts a UDP server that receives Vault audit logs and filters them based on configured rules.`,
+	Long:  `Starts an audit server that receives Vault audit logs and filters them based on configured rules.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		addr := fmt.Sprintf("udp://%s", viper.GetString("vault.audit_address"))
+		addr, err := auditServerListenAddress()
+		if err != nil {
+			return err
+		}
 		server, err := auditserver.New(logger)
 		if err != nil {
 			return fmt.Errorf("failed to create audit server: %w", err)
 		}
 		return gnet.Run(server, addr, gnet.WithMulticore(true))
 	},
+}
+
+func auditServerListenAddress() (string, error) {
+	protocol, err := vaultAuditProtocol()
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%s://%s", protocol, viper.GetString("vault.audit_address")), nil
 }
 
 func init() {

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -67,6 +68,7 @@ func init() {
 	rootCmd.PersistentFlags().String("vault.audit_path", "/vault-audit-filter", "Vault audit path")
 	rootCmd.PersistentFlags().String("vault.audit_address", "127.0.0.1:1269", "Courier audit device address to receive the audit")
 	rootCmd.PersistentFlags().String("vault.audit_description", "Courier audit device", "Vault audit description")
+	rootCmd.PersistentFlags().String("vault.audit_protocol", "udp", "Vault socket transport for audit delivery: udp or tcp")
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
@@ -94,6 +96,7 @@ func initConfig() {
 	viper.BindPFlag("vault.audit_path", rootCmd.PersistentFlags().Lookup("vault.audit_path"))
 	viper.BindPFlag("vault.audit_address", rootCmd.PersistentFlags().Lookup("vault.audit_address"))
 	viper.BindPFlag("vault.audit_description", rootCmd.PersistentFlags().Lookup("vault.audit_description"))
+	viper.BindPFlag("vault.audit_protocol", rootCmd.PersistentFlags().Lookup("vault.audit_protocol"))
 
 	viper.AutomaticEnv() // read in environment variables that match
 
@@ -107,5 +110,19 @@ func initConfig() {
 		logger.Info("No rules defined in configuration; all audit logs will be printed")
 	} else if slice, ok := ruleGroups.([]interface{}); ok && len(slice) == 0 {
 		logger.Info("No rules defined in configuration; all audit logs will be printed")
+	}
+}
+
+func vaultAuditProtocol() (string, error) {
+	protocol := strings.ToLower(strings.TrimSpace(viper.GetString("vault.audit_protocol")))
+	if protocol == "" {
+		protocol = "udp"
+	}
+
+	switch protocol {
+	case "udp", "tcp":
+		return protocol, nil
+	default:
+		return "", fmt.Errorf("unsupported vault.audit_protocol %q (allowed: udp, tcp)", protocol)
 	}
 }

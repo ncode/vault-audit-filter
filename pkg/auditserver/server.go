@@ -1,6 +1,7 @@
 package auditserver
 
 import (
+	"bytes"
 	"fmt"
 	json "github.com/bytedance/sonic"
 	"io"
@@ -133,6 +134,7 @@ type AuditServer struct {
 	*gnet.BuiltinEventEngine
 	logger                *slog.Logger
 	ruleGroups            []RuleGroup
+	auditTransport        string
 	sideQueue             chan sideTask
 	sideDrops             atomic.Uint64
 	asyncEnqueueMode      string
@@ -225,7 +227,49 @@ func (as *AuditServer) OnTraffic(c gnet.Conn) (action gnet.Action) {
 		as.logger.Error("Error reading frame", "error", err)
 		return gnet.Close
 	}
+	if as.auditTransport == "tcp" {
+		var carryover []byte
+		if ctx := c.Context(); ctx != nil {
+			if b, ok := ctx.([]byte); ok {
+				carryover = b
+			}
+		}
+
+		remaining := as.handleTCPStream(frame, carryover)
+		if len(remaining) == 0 {
+			c.SetContext(nil)
+			return gnet.None
+		}
+		c.SetContext(append([]byte(nil), remaining...))
+		return gnet.None
+	}
 	return as.handleFrame(frame)
+}
+
+func (as *AuditServer) handleTCPStream(frame []byte, carryover []byte) []byte {
+	buffer := append([]byte(nil), carryover...)
+	if len(frame) > 0 {
+		buffer = append(buffer, frame...)
+	}
+
+	for {
+		sep := bytes.IndexByte(buffer, '\n')
+		if sep < 0 {
+			return buffer
+		}
+
+		rawLine := buffer[:sep]
+		line := bytes.TrimSuffix(rawLine, []byte{'\r'})
+		if len(line) > 0 {
+			_ = as.handleFrame(line)
+		}
+
+		if sep == len(buffer)-1 {
+			buffer = buffer[:0]
+		} else {
+			buffer = buffer[sep+1:]
+		}
+	}
 }
 
 func (rg *RuleGroup) shouldLog(auditLog *AuditLog) bool {
@@ -242,6 +286,23 @@ func (rg *RuleGroup) shouldLog(auditLog *AuditLog) bool {
 		}
 	}
 	return false
+}
+
+func auditTransportProtocol(logger *slog.Logger) string {
+	protocol := strings.ToLower(strings.TrimSpace(viper.GetString("vault.audit_protocol")))
+	if protocol == "" {
+		protocol = "udp"
+	}
+
+	switch protocol {
+	case "udp", "tcp":
+		return protocol
+	default:
+		if logger != nil {
+			logger.Warn("Invalid vault.audit_protocol; using udp", "value", protocol)
+		}
+		return "udp"
+	}
 }
 
 func New(logger *slog.Logger) (*AuditServer, error) {
@@ -383,6 +444,7 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 	server := &AuditServer{
 		logger:                logger,
 		ruleGroups:            ruleGroups,
+		auditTransport:        auditTransportProtocol(logger),
 		sideQueue:             make(chan sideTask, queueSize),
 		asyncEnqueueMode:      enqueueMode,
 		asyncEnqueueTimeout:   enqueueTimeout,

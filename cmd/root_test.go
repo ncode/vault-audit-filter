@@ -23,6 +23,7 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRootCmd_Exists(t *testing.T) {
@@ -66,6 +67,30 @@ func TestRootCmd_PersistentFlags(t *testing.T) {
 	vaultAuditAddressFlag := flags.Lookup("vault.audit_address")
 	assert.NotNil(t, vaultAuditAddressFlag)
 	assert.Equal(t, "127.0.0.1:1269", vaultAuditAddressFlag.DefValue)
+
+	vaultAuditProtocolFlag := flags.Lookup("vault.audit_protocol")
+	assert.NotNil(t, vaultAuditProtocolFlag)
+	assert.Equal(t, "udp", vaultAuditProtocolFlag.DefValue)
+}
+
+func TestVaultAuditProtocol(t *testing.T) {
+	viper.Reset()
+	viper.Set("vault.audit_protocol", "")
+	protocol, err := vaultAuditProtocol()
+	require.NoError(t, err)
+	assert.Equal(t, "udp", protocol)
+
+	viper.Set("vault.audit_protocol", "TCP")
+	protocol, err = vaultAuditProtocol()
+	require.NoError(t, err)
+	assert.Equal(t, "tcp", protocol)
+
+	viper.Set("vault.audit_protocol", "invalid")
+	_, err = vaultAuditProtocol()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported vault.audit_protocol")
+
+	viper.Reset()
 }
 
 func TestInitConfig_WithConfigFile(t *testing.T) {

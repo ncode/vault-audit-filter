@@ -52,5 +52,5 @@ docker-down:
 
 # Run integration tests with docker
 integration: docker-up
-	VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root-token go test -tags=integration -v -race ./...
+	VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=root-token AUDIT_HOST=host.docker.internal go test -tags=integration -v -race ./...
 	$(MAKE) docker-down

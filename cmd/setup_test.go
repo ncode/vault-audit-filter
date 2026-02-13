@@ -78,34 +78,64 @@ func TestSetupCmd_EnableAuditError(t *testing.T) {
 }
 
 func TestSetupCmd_Success(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/auth/token/lookup-self":
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"data": {"id": "test-token"}}`))
-		case "/v1/sys/audit":
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"data": {}}`))
-		case "/v1/sys/audit/test-audit":
-			assert.Equal(t, http.MethodPut, r.Method)
-			var payload map[string]interface{}
-			json.NewDecoder(r.Body).Decode(&payload)
-			assert.Equal(t, "socket", payload["type"])
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			t.Errorf("Unexpected request to %s", r.URL.Path)
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-	}))
-	defer server.Close()
+	tests := []struct {
+		name     string
+		protocol string
+	}{
+		{name: "udp", protocol: "udp"},
+		{name: "tcp", protocol: "tcp"},
+	}
 
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/auth/token/lookup-self":
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte(`{"data": {"id": "test-token"}}`))
+				case "/v1/sys/audit":
+					w.WriteHeader(http.StatusOK)
+					w.Write([]byte(`{"data": {}}`))
+				case "/v1/sys/audit/test-audit":
+					assert.Equal(t, http.MethodPut, r.Method)
+					var payload struct {
+						Type    string                 `json:"type"`
+						Options map[string]interface{} `json:"options"`
+					}
+					json.NewDecoder(r.Body).Decode(&payload)
+					assert.Equal(t, "socket", payload.Type)
+					if assert.NotNil(t, payload.Options) {
+						assert.Equal(t, tc.protocol, payload.Options["socket_type"])
+					}
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					t.Errorf("Unexpected request to %s", r.URL.Path)
+					w.WriteHeader(http.StatusInternalServerError)
+				}
+			}))
+			defer server.Close()
+
+			viper.Reset()
+			viper.Set("vault.token", "test-token")
+			viper.Set("vault.address", server.URL)
+			viper.Set("vault.audit_path", "test-audit")
+			viper.Set("vault.audit_address", "127.0.0.1:1269")
+			viper.Set("vault.audit_description", "Test audit")
+			viper.Set("vault.audit_protocol", tc.protocol)
+
+			err := setupCmd.RunE(setupCmd, []string{})
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestSetupCmd_InvalidProtocol(t *testing.T) {
 	viper.Reset()
+	viper.Set("vault.address", "http://127.0.0.1:8200")
 	viper.Set("vault.token", "test-token")
-	viper.Set("vault.address", server.URL)
-	viper.Set("vault.audit_path", "test-audit")
-	viper.Set("vault.audit_address", "127.0.0.1:1269")
-	viper.Set("vault.audit_description", "Test audit")
+	viper.Set("vault.audit_protocol", "invalid")
 
 	err := setupCmd.RunE(setupCmd, []string{})
-	assert.NoError(t, err)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported vault.audit_protocol")
 }

@@ -161,3 +161,15 @@ Repository-specific guidance for agentic coding assistants working in `vault-aud
 - Run: `go test -v -race ./...`
 - If integration-related code changed, run: `go test -tags=integration -v -race ./...`
 - Summarize what changed, why, and exact verification commands executed.
+
+Before creating a new MR, also verify branch coverage for changed packages and close all misses/partials:
+
+- `go test ./... -coverpkg=./... -coverprofile=coverage.out`
+- `go tool cover -func=coverage.out`
+- If changed files show missing or partial coverage, add/update tests until those gaps are covered.
+
+Recommended quick package check (when only CLI/server packages changed):
+
+- `go test ./cmd ./pkg/auditserver -coverprofile=./coverage.out`
+- `go tool cover -func=coverage.out | grep -E 'cmd/auditServer.go|pkg/auditserver/server.go'`
+- Re-run with updated tests if any `0.0%` lines or partial statements remain in changed files.

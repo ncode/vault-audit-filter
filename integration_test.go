@@ -33,6 +33,25 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
+func tcpAuditAddressFromListener(listenerAddr net.Addr) string {
+	port := "0"
+	if _, p, err := net.SplitHostPort(listenerAddr.String()); err == nil {
+		port = p
+	}
+
+	host := getEnvOrDefault("AUDIT_HOST", "127.0.0.1")
+	return net.JoinHostPort(host, port)
+}
+
+func tcpListenerHost() string {
+	host := getEnvOrDefault("AUDIT_HOST", "127.0.0.1")
+	if host == "127.0.0.1" || host == "localhost" {
+		return host
+	}
+
+	return "0.0.0.0"
+}
+
 func TestIntegration_VaultConnection(t *testing.T) {
 	vaultAddr := getEnvOrDefault("VAULT_ADDR", defaultVaultAddr)
 	vaultToken := getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)
@@ -250,6 +269,130 @@ func TestIntegration_AuditServerWithRules(t *testing.T) {
 	// Clean up
 	_ = client.Sys().DisableAudit("integration-rules-test")
 	_ = client.Sys().Unmount("integration-kv-rules")
+}
+
+func TestIntegration_AuditServerWithRules_TCP(t *testing.T) {
+	vaultAddr := getEnvOrDefault("VAULT_ADDR", defaultVaultAddr)
+	vaultToken := getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)
+
+	tmpDir := t.TempDir()
+	logFile := tmpDir + "/audit-tcp.log"
+
+	viper.Reset()
+	viper.Set("rule_groups", []map[string]interface{}{
+		{
+			"name": "all_tcp",
+			"rules": []string{
+				"true",
+			},
+			"log_file": map[string]interface{}{
+				"file_path":   logFile,
+				"max_size":    10,
+				"max_backups": 1,
+				"max_age":     1,
+				"compress":    false,
+			},
+		},
+	})
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	server, err := auditserver.New(logger)
+	require.NoError(t, err)
+	require.NotNil(t, server)
+
+	tcpListenAddr := net.JoinHostPort(tcpListenerHost(), "0")
+	addr, err := net.ResolveTCPAddr("tcp", tcpListenAddr)
+	require.NoError(t, err)
+
+	auditListener, err := net.ListenTCP("tcp", addr)
+	require.NoError(t, err)
+	defer auditListener.Close()
+
+	auditDone := make(chan struct{})
+	go func() {
+		defer close(auditDone)
+
+		conn, acceptErr := auditListener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 65535)
+		carry := make([]byte, 0)
+		for {
+			n, readErr := conn.Read(buf)
+			if n > 0 {
+				carry = append(carry, buf[:n]...)
+
+				for {
+					idx := bytes.IndexByte(carry, '\n')
+					if idx < 0 {
+						break
+					}
+
+					frame := carry[:idx]
+					frame = bytes.TrimSuffix(frame, []byte{'\r'})
+					if len(frame) > 0 {
+						server.React(frame, nil)
+					}
+
+					if idx+1 >= len(carry) {
+						carry = carry[:0]
+					} else {
+						carry = carry[idx+1:]
+					}
+				}
+			}
+
+			if readErr != nil {
+				return
+			}
+		}
+	}()
+
+	client, err := vault.NewVaultClient(vaultAddr, vault.TokenAuth{Token: vaultToken})
+	require.NoError(t, err)
+
+	_ = client.Sys().DisableAudit("integration-rules-tcp-test")
+
+	err = client.EnableAuditDevice(
+		"integration-rules-tcp-test",
+		"socket",
+		"Integration TCP rules test",
+		map[string]string{
+			"address":     tcpAuditAddressFromListener(auditListener.Addr()),
+			"socket_type": "tcp",
+			"log_raw":     "false",
+		},
+	)
+	require.NoError(t, err)
+
+	err = client.Sys().Mount("integration-kv-rules-tcp", &vaultapi.MountInput{
+		Type:        "kv",
+		Description: "Integration test KV for tcp rules",
+		Options:     map[string]string{"version": "2"},
+	})
+	if err != nil && !strings.Contains(err.Error(), "path is already in use") {
+		require.NoError(t, err)
+	}
+
+	_, err = client.Logical().Write("integration-kv-rules-tcp/data/test", map[string]interface{}{
+		"data": map[string]interface{}{"key": "value"},
+	})
+	require.NoError(t, err)
+
+	time.Sleep(1 * time.Second)
+
+	_ = client.Sys().DisableAudit("integration-rules-tcp-test")
+	_ = client.Sys().Unmount("integration-kv-rules-tcp")
+	_ = auditListener.Close()
+	<-auditDone
+
+	content, err := os.ReadFile(logFile)
+	require.NoError(t, err)
+	assert.Greater(t, len(content), 0, "should have written audit logs over TCP")
 }
 
 func TestIntegration_AuditServerForwarding(t *testing.T) {

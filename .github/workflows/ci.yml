@@ -39,6 +39,7 @@ jobs:
           --health-interval=2s
           --health-timeout=5s
           --health-retries=15
+          --add-host=host.docker.internal:host-gateway
     steps:
       - uses: actions/checkout@v6.0.2
       - uses: actions/setup-go@v6.2.0
@@ -58,4 +59,5 @@ jobs:
         env:
           VAULT_ADDR: http://127.0.0.1:8200
           VAULT_TOKEN: root-token
+          AUDIT_HOST: host.docker.internal
         run: go env -w GOTOOLCHAIN=go1.25.0+auto && go test -tags=integration -v -race ./...

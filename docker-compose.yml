@@ -11,6 +11,8 @@ services:
     cap_add:
       - IPC_LOCK
     command: "vault server -dev -dev-root-token-id=root-token -dev-listen-address=0.0.0.0:8200"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "vault", "status"]
       interval: 2s
