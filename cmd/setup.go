@@ -27,10 +27,15 @@ import (
 var setupCmd = &cobra.Command{
 	Use:   "setup",
 	Short: "Setup vault audit device",
-	Long:  `Configures Vault to send audit logs to this service via UDP socket.`,
+	Long:  `Configures Vault to send audit logs to this service via socket transport.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if viper.GetString("vault.token") == "" {
 			return fmt.Errorf("vault.token is required")
+		}
+
+		protocol, err := vaultAuditProtocol()
+		if err != nil {
+			return err
 		}
 
 		client, err := vault.NewVaultClient(viper.GetString("vault.address"), vault.TokenAuth{Token: viper.GetString("vault.token")})
@@ -44,8 +49,8 @@ var setupCmd = &cobra.Command{
 			viper.GetString("vault.audit_description"),
 			map[string]string{
 				"address":     viper.GetString("vault.audit_address"),
+				"socket_type": protocol,
 				"description": viper.GetString("vault.audit_description"),
-				"socket_type": "udp",
 				"log_raw":     "false",
 			},
 		)

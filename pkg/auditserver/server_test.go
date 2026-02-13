@@ -1369,6 +1369,58 @@ func TestRuleGroup_shouldLog_RuntimeErrorContinues(t *testing.T) {
 	assert.True(t, rg.shouldLog(&AuditLog{}))
 }
 
+func TestAuditServer_HandleTCPStream(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	writer := new(bytes.Buffer)
+
+	as := &AuditServer{
+		logger: logger,
+		ruleGroups: []RuleGroup{
+			{Name: "default", Writer: writer},
+		},
+	}
+
+	stream := []byte(string(auditFrame()) + "\n" + string(auditFrame()) + "\r\n")
+	remaining := as.handleTCPStream(stream, nil)
+	require.Empty(t, remaining)
+
+	frameText := string(auditFrame())
+	assert.Equal(t, 2, strings.Count(writer.String(), frameText))
+
+	// split frame across reads and validate carryover behavior
+	full := string(auditFrame())
+	mid := len(full) / 2
+	carry := as.handleTCPStream([]byte(full[:mid]), nil)
+	require.NotEmpty(t, carry)
+
+	carry = as.handleTCPStream([]byte(full[mid:]+"\n"), carry)
+	require.Empty(t, carry)
+
+	assert.Equal(t, 3, strings.Count(writer.String(), frameText))
+}
+
+func TestNew_AuditTransportConfiguration(t *testing.T) {
+	viper.Reset()
+	server, err := New(nil)
+	require.NoError(t, err)
+	assert.Equal(t, "udp", server.auditTransport)
+
+	viper.Reset()
+	viper.Set("vault.audit_protocol", "tcp")
+	server, err = New(nil)
+	require.NoError(t, err)
+	assert.Equal(t, "tcp", server.auditTransport)
+
+	viper.Reset()
+	viper.Set("vault.audit_protocol", "invalid")
+	logBuffer := new(bytes.Buffer)
+	logger := slog.New(slog.NewTextHandler(logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	server, err = New(logger)
+	require.NoError(t, err)
+	assert.Equal(t, "udp", server.auditTransport)
+	assert.Contains(t, logBuffer.String(), "Invalid vault.audit_protocol")
+}
+
 func TestNew_AsyncEnqueueModeBlankFallsBackToDrop(t *testing.T) {
 	viper.Reset()
 	viper.Set("rule_groups", []map[string]interface{}{})

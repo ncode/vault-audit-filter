@@ -20,6 +20,7 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAuditServerCmd_InvalidRuleGroups(t *testing.T) {
@@ -62,4 +63,23 @@ func TestAuditServerCmd_RunE_InvokesGnetRun(t *testing.T) {
 
 	err := auditServerCmd.RunE(auditServerCmd, []string{})
 	assert.Error(t, err)
+}
+
+func TestAuditServerCmd_ListenAddress(t *testing.T) {
+	viper.Reset()
+	viper.Set("vault.audit_address", "127.0.0.1:1269")
+
+	addr, err := auditServerListenAddress()
+	require.NoError(t, err)
+	assert.Equal(t, "udp://127.0.0.1:1269", addr)
+
+	viper.Set("vault.audit_protocol", "tcp")
+	addr, err = auditServerListenAddress()
+	require.NoError(t, err)
+	assert.Equal(t, "tcp://127.0.0.1:1269", addr)
+
+	viper.Set("vault.audit_protocol", "invalid")
+	_, err = auditServerListenAddress()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported vault.audit_protocol")
 }

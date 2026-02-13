@@ -66,6 +66,7 @@ Once you have built the project, you can run the `vault-audit-filter` executable
       token: "your-vault-token"
       audit_path: "/vault-audit-filter"
       audit_address: "127.0.0.1:1269"
+      audit_protocol: "udp"
       audit_description: "Vault Audit Filter Device"
 
     async:
@@ -116,6 +117,7 @@ Once you have built the project, you can run the `vault-audit-filter` executable
   - `vault.token`: Vault token for authentication.
   - `vault.audit_path`: The path for Vault's audit device.
   - `vault.audit_address`: The address for receiving audit logs.
+  - `vault.audit_protocol`: Socket transport for Vault audit device (`udp` or `tcp`, default `udp`).
   - `vault.audit_description`: Description for the Vault audit device.
 
 - **Rule Groups**:
@@ -218,7 +220,7 @@ Configure Vault to send audit logs to this service:
 
 ### Start the Audit Server
 
-Start the UDP server to receive and filter Vault audit logs:
+Start the audit server to receive and filter Vault audit logs:
 
 ```bash
 ./vault-audit-filter auditServer --config config.yaml
@@ -233,6 +235,7 @@ Start the UDP server to receive and filter Vault audit logs:
 - `--vault.token`: Vault authentication token.
 - `--vault.audit_path`: Path for the Vault audit device (default: `/vault-audit-filter`).
 - `--vault.audit_address`: Address for receiving audit logs (default: `127.0.0.1:1269`).
+- `--vault.audit_protocol`: Audit socket transport (`udp` or `tcp`, default: `udp`).
 - `--vault.audit_description`: Description for the Vault audit device.
 
 ### Environment Variables
@@ -243,6 +246,8 @@ You can also define environment variables to override configuration file values.
 $ export VAULT_ADDRESS="http://127.0.0.1:8200"
 $ export VAULT_TOKEN="your-vault-token"
 ```
+
+For integration tests that run Vault in Docker, set `AUDIT_HOST=host.docker.internal` so the containerized Vault can reach the host-side TCP listener used by integration tests.
 
 ## Testing
 
