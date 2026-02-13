@@ -43,6 +43,15 @@ func tcpAuditAddressFromListener(listenerAddr net.Addr) string {
 	return net.JoinHostPort(host, port)
 }
 
+func tcpListenerHost() string {
+	host := getEnvOrDefault("AUDIT_HOST", "127.0.0.1")
+	if host == "127.0.0.1" || host == "localhost" {
+		return host
+	}
+
+	return "0.0.0.0"
+}
+
 func TestIntegration_VaultConnection(t *testing.T) {
 	vaultAddr := getEnvOrDefault("VAULT_ADDR", defaultVaultAddr)
 	vaultToken := getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)
@@ -292,7 +301,8 @@ func TestIntegration_AuditServerWithRules_TCP(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, server)
 
-	addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
+	tcpListenAddr := net.JoinHostPort(tcpListenerHost(), "0")
+	addr, err := net.ResolveTCPAddr("tcp", tcpListenAddr)
 	require.NoError(t, err)
 
 	auditListener, err := net.ListenTCP("tcp", addr)
