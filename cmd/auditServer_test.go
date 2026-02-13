@@ -65,6 +65,17 @@ func TestAuditServerCmd_RunE_InvokesGnetRun(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestAuditServerCmd_RunE_ListenAddressError(t *testing.T) {
+	viper.Reset()
+	viper.Set("vault.audit_protocol", "invalid")
+	viper.Set("vault.audit_address", "127.0.0.1:1269")
+	viper.Set("rule_groups", []map[string]interface{}{})
+
+	err := auditServerCmd.RunE(auditServerCmd, []string{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported vault.audit_protocol")
+}
+
 func TestAuditServerCmd_ListenAddress(t *testing.T) {
 	viper.Reset()
 	viper.Set("vault.audit_address", "127.0.0.1:1269")

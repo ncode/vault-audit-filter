@@ -1180,6 +1180,7 @@ type fakeTrafficConn struct {
 	gnet.Conn
 	frame []byte
 	err   error
+	ctx   any
 }
 
 func (c *fakeTrafficConn) Next(_ int) ([]byte, error) {
@@ -1187,6 +1188,14 @@ func (c *fakeTrafficConn) Next(_ int) ([]byte, error) {
 		return nil, c.err
 	}
 	return c.frame, nil
+}
+
+func (c *fakeTrafficConn) Context() any {
+	return c.ctx
+}
+
+func (c *fakeTrafficConn) SetContext(ctx any) {
+	c.ctx = ctx
 }
 
 // minimal JSON frame that parses into an AuditLog
@@ -1744,5 +1753,57 @@ func TestOnTraffic(t *testing.T) {
 
 		action := srv.OnTraffic(&fakeTrafficConn{frame: auditFrame()})
 		require.Equal(t, gnet.None, action)
+	})
+}
+
+func TestOnTraffic_TCP(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	t.Run("complete frames clear context", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		srv := &AuditServer{
+			logger:         logger,
+			auditTransport: "tcp",
+			ruleGroups:     []RuleGroup{{Name: "all", CompiledRules: nil, Writer: buf}},
+			sideQueue:      make(chan sideTask, 1),
+		}
+
+		stream := append(auditFrame(), '\n')
+		stream = append(stream, auditFrame()...)
+		stream = append(stream, '\r', '\n')
+
+		conn := &fakeTrafficConn{frame: stream}
+		action := srv.OnTraffic(conn)
+
+		require.Equal(t, gnet.None, action)
+		require.NoError(t, conn.err)
+		require.Nil(t, conn.Context())
+		assert.Equal(t, 2, strings.Count(buf.String(), string(auditFrame())))
+	})
+
+	t.Run("partial frame keeps context", func(t *testing.T) {
+		buf := new(bytes.Buffer)
+		srv := &AuditServer{
+			logger:         logger,
+			auditTransport: "tcp",
+			ruleGroups:     []RuleGroup{{Name: "all", CompiledRules: nil, Writer: buf}},
+			sideQueue:      make(chan sideTask, 1),
+		}
+
+		line := auditFrame()
+		half := len(line) / 2
+		conn := &fakeTrafficConn{
+			ctx:   append([]byte(nil), line[:half]...),
+			frame: append(append([]byte(nil), line[half:]...), '\n'),
+		}
+		conn.frame = append(conn.frame, line...)
+
+		action := srv.OnTraffic(conn)
+
+		require.Equal(t, gnet.None, action)
+		remaining, ok := conn.Context().([]byte)
+		require.True(t, ok)
+		assert.Equal(t, line, remaining)
+		assert.Equal(t, 1, strings.Count(buf.String(), string(line)))
 	})
 }
