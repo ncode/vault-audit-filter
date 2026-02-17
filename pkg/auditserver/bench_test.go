@@ -31,6 +31,31 @@ func BenchmarkReact(b *testing.B) {
 	}
 }
 
+func BenchmarkMatchFrame(b *testing.B) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	viper.Reset()
+	viper.Set("rule_groups", []map[string]interface{}{
+		{
+			"name":  "rg",
+			"rules": []string{"Auth.PolicyResults.Allowed == true"},
+			"log_file": map[string]interface{}{
+				"file_path": "/tmp/test.log",
+				"max_size":  1,
+			},
+		},
+	})
+	server, _ := New(logger)
+	frame := []byte(`{"type":"request","time":"2000-01-01T00:00:00Z","auth":{"policy_results":{"allowed":true}},"request":{},"response":{}}`)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := server.MatchFrame(frame)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkShouldLog(b *testing.B) {
 	p, _ := expr.Compile("true", expr.Env(&AuditLog{}))
 	rg := &RuleGroup{CompiledRules: []CompiledRule{{Program: p}}}

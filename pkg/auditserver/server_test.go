@@ -269,6 +269,118 @@ func TestAuditServer_React(t *testing.T) {
 	}
 }
 
+func TestMatchFrame(t *testing.T) {
+	viper.Reset()
+	viper.Set("rule_groups", []RuleGroupConfig{
+		{
+			Name: "updates",
+			Rules: []string{
+				`Request.Operation in ["update", "create"] && Request.Path == "secret/data/config" && Auth.PolicyResults.Allowed == true`,
+			},
+		},
+	})
+
+	as, err := New(nil)
+	require.NoError(t, err)
+
+	t.Run("matches and returns parsed log", func(t *testing.T) {
+		log := []byte(`{"type":"request","time":"2024-01-01T00:00:00Z","request":{"operation":"update","path":"secret/data/config"},"auth":{"policy_results":{"allowed":true}}}`)
+		result, err := as.MatchFrame(log)
+		require.NoError(t, err)
+		assert.True(t, result.Matched)
+		assert.Equal(t, "update", result.Log.Request.Operation)
+		assert.Equal(t, "secret/data/config", result.Log.Request.Path)
+		assert.Equal(t, []string{"updates"}, result.MatchedGroups)
+	})
+
+	t.Run("non-matching returns false", func(t *testing.T) {
+		log := []byte(`{"type":"request","time":"2024-01-01T00:00:00Z","request":{"operation":"read","path":"secret/data/config"},"auth":{"policy_results":{"allowed":true}}}`)
+		result, err := as.MatchFrame(log)
+		require.NoError(t, err)
+		assert.False(t, result.Matched)
+		assert.Empty(t, result.MatchedGroups)
+	})
+
+	t.Run("invalid json returns error", func(t *testing.T) {
+		_, err := as.MatchFrame([]byte(`{"invalid":`))
+		require.Error(t, err)
+	})
+}
+
+func TestMatchFrame_UsesMatcherRulesForMatchGroups(t *testing.T) {
+	viper.Reset()
+	viper.Set("rule_groups", []RuleGroupConfig{
+		{
+			Name:  "only_updates",
+			Rules: []string{`Request.Operation == "update" && Auth.PolicyResults.Allowed == true`},
+		},
+		{
+			Name:  "all_reads",
+			Rules: []string{`Request.Operation == "read" && Auth.PolicyResults.Allowed == true`},
+		},
+	})
+
+	as, err := New(nil)
+	require.NoError(t, err)
+
+	result, err := as.MatchFrame([]byte(`{"type":"request","time":"2024-01-01T00:00:00Z","request":{"operation":"read","path":"secret/data/config"},"auth":{"policy_results":{"allowed":true}}}`))
+	require.NoError(t, err)
+	assert.True(t, result.Matched)
+	assert.Equal(t, []string{"all_reads"}, result.MatchedGroups)
+}
+
+func TestMatchFrame_ReportsAllMatchingGroupsInOrder(t *testing.T) {
+	viper.Reset()
+	viper.Set("rule_groups", []RuleGroupConfig{
+		{
+			Name:  "first",
+			Rules: []string{`Request.Operation == "read" && Auth.PolicyResults.Allowed == true`},
+		},
+		{
+			Name:  "second",
+			Rules: []string{`Request.Path == "secret/data/config" && Auth.PolicyResults.Allowed == true`},
+		},
+		{
+			Name:  "third",
+			Rules: []string{`Request.Operation == "read" && Request.Path == "secret/data/config" && Auth.PolicyResults.Allowed == true`},
+		},
+	})
+
+	as, err := New(nil)
+	require.NoError(t, err)
+
+	result, err := as.MatchFrame([]byte(`{"type":"request","time":"2024-01-01T00:00:00Z","request":{"operation":"read","path":"secret/data/config"},"auth":{"policy_results":{"allowed":true}}}`))
+	require.NoError(t, err)
+	assert.True(t, result.Matched)
+	assert.Equal(t, []string{"first", "second", "third"}, result.MatchedGroups)
+}
+
+func ExampleAuditServer_MatchFrame() {
+	viper.Reset()
+	defer viper.Reset()
+
+	viper.Set("rule_groups", []RuleGroupConfig{
+		{
+			Name:  "writes",
+			Rules: []string{`Request.Operation == "update" && Auth.PolicyResults.Allowed == true`},
+		},
+	})
+
+	as, err := New(nil)
+	if err != nil {
+		panic(err)
+	}
+
+	result, err := as.MatchFrame([]byte(`{"type":"request","time":"2024-01-01T00:00:00Z","request":{"operation":"update","path":"secret/data/config"},"auth":{"policy_results":{"allowed":true}}}`))
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Printf("matched=%v groups=%v\n", result.Matched, result.MatchedGroups)
+	// Output:
+	// matched=true groups=[writes]
+}
+
 func TestNew(t *testing.T) {
 	// Define rule group configurations with an invalid rule and messenger type
 	ruleGroupConfigs := []RuleGroupConfig{
