@@ -150,70 +150,124 @@ type AuditServer struct {
 	sideTaskSeq           atomic.Uint64
 }
 
-func (as *AuditServer) handleFrame(frame []byte) gnet.Action {
-	// Parse the audit log for rule evaluation
+// MatchResult describes the outcome of matching a single audit frame.
+// It mirrors the rule-group matching behavior used by the runtime event loop,
+// returning the decoded log and any rule groups that matched.
+type MatchResult struct {
+	Matched       bool
+	Log           AuditLog
+	MatchedGroups []string
+}
+
+type matchResult struct {
+	Matched             bool
+	Log                 AuditLog
+	matchedGroupIndexes []int
+}
+
+// MatchFrame evaluates a raw audit log frame against configured rule groups.
+// It returns whether any group matched, the decoded audit log, and the names of
+// matching rule groups in configured order.
+func (as *AuditServer) MatchFrame(frame []byte) (MatchResult, error) {
+	result, err := as.matchFrame(frame)
+	if err != nil {
+		return MatchResult{}, err
+	}
+
+	matchedGroups := make([]string, 0, len(result.matchedGroupIndexes))
+	for _, idx := range result.matchedGroupIndexes {
+		matchedGroups = append(matchedGroups, as.ruleGroups[idx].Name)
+	}
+
+	return MatchResult{
+		Matched:       result.Matched,
+		Log:           result.Log,
+		MatchedGroups: matchedGroups,
+	}, nil
+}
+
+func (as *AuditServer) matchFrame(frame []byte) (matchResult, error) {
 	auditLog := auditLogPool.Get().(*AuditLog)
-	*auditLog = AuditLog{} // reset pooled object
+	*auditLog = AuditLog{}
 
 	err := json.Unmarshal(frame, auditLog)
 	if err != nil {
-		as.logger.Error("Error parsing audit log", "error", err)
 		auditLogPool.Put(auditLog)
-		return gnet.Close
+		return matchResult{}, err
 	}
 
-	matched := false
+	var matchedIndexes []int
+	for idx := range as.ruleGroups {
+		if as.ruleGroups[idx].shouldLog(auditLog) {
+			matchedIndexes = append(matchedIndexes, idx)
+		}
+	}
+	result := matchResult{
+		Matched:             len(matchedIndexes) > 0,
+		Log:                 *auditLog,
+		matchedGroupIndexes: matchedIndexes,
+	}
+
+	auditLogPool.Put(auditLog)
+	return result, nil
+}
+
+func (as *AuditServer) handleFrameWithResult(frame []byte, result matchResult) {
+
 	var payload []byte
 	var payloadStr string
 	payloadReady := false
 	payloadStrReady := false
 
-	// Check each rule group
-	for _, rg := range as.ruleGroups {
-		if rg.shouldLog(auditLog) {
-			matched = true
-			as.logger.Debug("Matched rule group", "group", rg.Name)
+	for _, rgIdx := range result.matchedGroupIndexes {
+		rg := as.ruleGroups[rgIdx]
 
-			if rg.Messenger != nil || rg.Forwarder != nil {
-				if !payloadReady {
-					payload = append([]byte(nil), frame...)
-					payloadReady = true
-				}
-				if rg.Messenger != nil && !payloadStrReady {
-					payloadStr = string(payload)
-					payloadStrReady = true
-				}
-				_ = as.enqueueSide(sideTask{
-					groupName:  rg.Name,
-					payload:    payload,
-					payloadStr: payloadStr,
-					messenger:  rg.Messenger,
-					forwarder:  rg.Forwarder,
-				})
+		as.logger.Debug("Matched rule group", "group", rg.Name)
+
+		if rg.Messenger != nil || rg.Forwarder != nil {
+			if !payloadReady {
+				payload = append([]byte(nil), frame...)
+				payloadReady = true
 			}
+			if rg.Messenger != nil && !payloadStrReady {
+				payloadStr = string(payload)
+				payloadStrReady = true
+			}
+			_ = as.enqueueSide(sideTask{
+				groupName:  rg.Name,
+				payload:    payload,
+				payloadStr: payloadStr,
+				messenger:  rg.Messenger,
+				forwarder:  rg.Forwarder,
+			})
+		}
 
-			// zero‑copy write to log when possible
-			if rg.Writer != nil {
-				if _, err := rg.Writer.Write(frame); err != nil {
-					as.logger.Error("Failed to write audit log", "group", rg.Name, "error", err)
-				}
+		if rg.Writer != nil {
+			if _, err := rg.Writer.Write(frame); err != nil {
+				as.logger.Error("Failed to write audit log", "group", rg.Name, "error", err)
+			}
+		} else {
+			if payloadStrReady {
+				rg.Logger.Print(payloadStr)
 			} else {
-				if payloadStrReady {
-					rg.Logger.Print(payloadStr)
-				} else {
-					rg.Logger.Print(string(frame))
-				}
+				rg.Logger.Print(string(frame))
 			}
-			// TODO(JM):Add a flag to prevent logging to multiple groups
-			// break
 		}
 	}
+}
 
-	auditLogPool.Put(auditLog)
-
-	if !matched {
+func (as *AuditServer) handleFrame(frame []byte) gnet.Action {
+	result, err := as.matchFrame(frame)
+	if err != nil {
+		as.logger.Error("Error parsing audit log", "error", err)
 		return gnet.Close
 	}
+	if !result.Matched {
+		return gnet.Close
+	}
+
+	as.handleFrameWithResult(frame, result)
+
 	return gnet.None
 }
 
