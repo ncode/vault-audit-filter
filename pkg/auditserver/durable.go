@@ -148,16 +148,18 @@ func (s *fileSideTaskStore) Pending() ([]sideTask, error) {
 	return tasks, nil
 }
 
-func (as *AuditServer) replayDurablePending() {
-	if as.sideStore == nil {
+func (p *sideEffectProcessor) replayDurablePending() {
+	if p.store == nil {
 		return
 	}
-	tasks, err := as.sideStore.Pending()
+	tasks, err := p.store.Pending()
 	if err != nil {
-		as.logger.Error("Failed to load durable pending tasks", "error", err)
+		if p.logger != nil {
+			p.logger.Error("Failed to load durable pending tasks", "error", err)
+		}
 		return
 	}
 	for _, task := range tasks {
-		_ = as.enqueueSide(task)
+		_ = p.enqueue(task)
 	}
 }

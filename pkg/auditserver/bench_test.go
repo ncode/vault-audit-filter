@@ -6,23 +6,18 @@ import (
 	"testing"
 
 	"github.com/expr-lang/expr"
-	"github.com/spf13/viper"
 )
 
 func BenchmarkReact(b *testing.B) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	settings := testRuntimeSettings([]RuleGroupConfig{
 		{
-			"name":  "rg",
-			"rules": []string{"true"},
-			"log_file": map[string]interface{}{
-				"file_path": "/tmp/test.log",
-				"max_size":  1,
-			},
+			Name:    "rg",
+			Rules:   []string{"true"},
+			LogFile: LogFileConfig{FilePath: "/tmp/test.log", MaxSize: 1},
 		},
 	})
-	server, _ := New(logger)
+	server, _ := New(logger, settings)
 	frame := []byte(`{"type":"request","time":"2000-01-01T00:00:00Z","auth":{},"request":{},"response":{}}`)
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -33,18 +28,14 @@ func BenchmarkReact(b *testing.B) {
 
 func BenchmarkMatchFrame(b *testing.B) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	settings := testRuntimeSettings([]RuleGroupConfig{
 		{
-			"name":  "rg",
-			"rules": []string{"Auth.PolicyResults.Allowed == true"},
-			"log_file": map[string]interface{}{
-				"file_path": "/tmp/test.log",
-				"max_size":  1,
-			},
+			Name:    "rg",
+			Rules:   []string{"Auth.PolicyResults.Allowed == true"},
+			LogFile: LogFileConfig{FilePath: "/tmp/test.log", MaxSize: 1},
 		},
 	})
-	server, _ := New(logger)
+	server, _ := New(logger, settings)
 	frame := []byte(`{"type":"request","time":"2000-01-01T00:00:00Z","auth":{"policy_results":{"allowed":true}},"request":{},"response":{}}`)
 	b.ReportAllocs()
 	b.ResetTimer()

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,7 +24,6 @@ import (
 
 	"github.com/expr-lang/expr"
 	"github.com/panjf2000/gnet/v2"
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
@@ -77,6 +77,12 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
+func testRuntimeSettings(ruleGroups []RuleGroupConfig) RuntimeSettings {
+	settings := DefaultRuntimeSettings()
+	settings.RuleGroups = ruleGroups
+	return settings
+}
+
 func TestAuditServer_React(t *testing.T) {
 	// Create a temporary directory for log files
 	tempDir := t.TempDir()
@@ -101,9 +107,6 @@ func TestAuditServer_React(t *testing.T) {
 			},
 		},
 	}
-
-	// Initialize viper with the rule group configurations
-	viper.Set("rule_groups", ruleGroupConfigs)
 
 	for _, tt := range []struct {
 		name                string
@@ -206,7 +209,7 @@ func TestAuditServer_React(t *testing.T) {
 			logger := slog.New(slog.NewJSONHandler(logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 			// Create the AuditServer
-			as, _ := New(logger)
+			as, _ := New(logger, testRuntimeSettings(ruleGroupConfigs))
 
 			// Set up mock messenger if needed
 			for i := range as.ruleGroups {
@@ -270,17 +273,14 @@ func TestAuditServer_React(t *testing.T) {
 }
 
 func TestMatchFrame(t *testing.T) {
-	viper.Reset()
-	viper.Set("rule_groups", []RuleGroupConfig{
+	as, err := New(nil, testRuntimeSettings([]RuleGroupConfig{
 		{
 			Name: "updates",
 			Rules: []string{
 				`Request.Operation in ["update", "create"] && Request.Path == "secret/data/config" && Auth.PolicyResults.Allowed == true`,
 			},
 		},
-	})
-
-	as, err := New(nil)
+	}))
 	require.NoError(t, err)
 
 	t.Run("matches and returns parsed log", func(t *testing.T) {
@@ -308,8 +308,7 @@ func TestMatchFrame(t *testing.T) {
 }
 
 func TestMatchFrame_UsesMatcherRulesForMatchGroups(t *testing.T) {
-	viper.Reset()
-	viper.Set("rule_groups", []RuleGroupConfig{
+	as, err := New(nil, testRuntimeSettings([]RuleGroupConfig{
 		{
 			Name:  "only_updates",
 			Rules: []string{`Request.Operation == "update" && Auth.PolicyResults.Allowed == true`},
@@ -318,9 +317,7 @@ func TestMatchFrame_UsesMatcherRulesForMatchGroups(t *testing.T) {
 			Name:  "all_reads",
 			Rules: []string{`Request.Operation == "read" && Auth.PolicyResults.Allowed == true`},
 		},
-	})
-
-	as, err := New(nil)
+	}))
 	require.NoError(t, err)
 
 	result, err := as.MatchFrame([]byte(`{"type":"request","time":"2024-01-01T00:00:00Z","request":{"operation":"read","path":"secret/data/config"},"auth":{"policy_results":{"allowed":true}}}`))
@@ -330,8 +327,7 @@ func TestMatchFrame_UsesMatcherRulesForMatchGroups(t *testing.T) {
 }
 
 func TestMatchFrame_ReportsAllMatchingGroupsInOrder(t *testing.T) {
-	viper.Reset()
-	viper.Set("rule_groups", []RuleGroupConfig{
+	as, err := New(nil, testRuntimeSettings([]RuleGroupConfig{
 		{
 			Name:  "first",
 			Rules: []string{`Request.Operation == "read" && Auth.PolicyResults.Allowed == true`},
@@ -344,9 +340,7 @@ func TestMatchFrame_ReportsAllMatchingGroupsInOrder(t *testing.T) {
 			Name:  "third",
 			Rules: []string{`Request.Operation == "read" && Request.Path == "secret/data/config" && Auth.PolicyResults.Allowed == true`},
 		},
-	})
-
-	as, err := New(nil)
+	}))
 	require.NoError(t, err)
 
 	result, err := as.MatchFrame([]byte(`{"type":"request","time":"2024-01-01T00:00:00Z","request":{"operation":"read","path":"secret/data/config"},"auth":{"policy_results":{"allowed":true}}}`))
@@ -356,17 +350,12 @@ func TestMatchFrame_ReportsAllMatchingGroupsInOrder(t *testing.T) {
 }
 
 func ExampleAuditServer_MatchFrame() {
-	viper.Reset()
-	defer viper.Reset()
-
-	viper.Set("rule_groups", []RuleGroupConfig{
+	as, err := New(nil, testRuntimeSettings([]RuleGroupConfig{
 		{
 			Name:  "writes",
 			Rules: []string{`Request.Operation == "update" && Auth.PolicyResults.Allowed == true`},
 		},
-	})
-
-	as, err := New(nil)
+	}))
 	if err != nil {
 		panic(err)
 	}
@@ -403,14 +392,11 @@ func TestNew(t *testing.T) {
 		},
 	}
 
-	// Initialize viper with the rule group configurations
-	viper.Set("rule_groups", ruleGroupConfigs)
-
 	// Capture logs
 	logBuffer := &lockedBuffer{}
 	logger := slog.New(slog.NewJSONHandler(logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	server, _ := New(logger)
+	server, _ := New(logger, testRuntimeSettings(ruleGroupConfigs))
 	if len(server.ruleGroups) != len(ruleGroupConfigs) {
 		t.Errorf("Expected %d rule groups, got %d", len(ruleGroupConfigs), len(server.ruleGroups))
 	}
@@ -439,8 +425,6 @@ func TestNew(t *testing.T) {
 }
 
 func TestNew_DefaultRuleGroup_WhenMissingOrEmpty(t *testing.T) {
-	viper.Reset()
-
 	// Missing rule_groups
 	server, err := New(nil)
 	require.NoError(t, err)
@@ -450,15 +434,12 @@ func TestNew_DefaultRuleGroup_WhenMissingOrEmpty(t *testing.T) {
 	assert.NotNil(t, server.ruleGroups[0].Logger)
 
 	// Empty rule_groups
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{})
-	server, err = New(nil)
+	server, err = New(nil, testRuntimeSettings(nil))
 	require.NoError(t, err)
 	require.Len(t, server.ruleGroups, 1)
 }
 
 func TestNew_AsyncDefaults(t *testing.T) {
-	viper.Reset()
 	server, err := New(nil)
 	require.NoError(t, err)
 	require.NotNil(t, server)
@@ -469,37 +450,75 @@ func TestNew_AsyncDefaults(t *testing.T) {
 	assert.Equal(t, 5*time.Second, server.asyncTimeout)
 }
 
-func TestNew_InvalidEnqueueModeFallsBackToDrop(t *testing.T) {
-	viper.Reset()
-	viper.Set("async.enqueue_mode", "invalid")
-	viper.Set("async.enqueue_timeout", "12ms")
+func TestNew_UsesExplicitRuntimeSettings(t *testing.T) {
+	settings := DefaultRuntimeSettings()
+	settings.AuditProtocol = "tcp"
+	settings.Async.QueueSize = 7
+	settings.Async.Workers = 0
+	settings.Async.EnqueueMode = "wait"
+	settings.Async.EnqueueTimeout = 11 * time.Millisecond
+	settings.Async.Timeout = 17 * time.Millisecond
+	settings.Async.Durable.Enabled = true
+	settings.Async.Durable.Dir = t.TempDir()
+	settings.Async.Retry.MaxAttempts = 5
+	settings.Async.Retry.Backoff = 23 * time.Millisecond
+	settings.RuleGroups = []RuleGroupConfig{{
+		Name: "explicit",
+		Rules: []string{
+			"Request.Operation == 'read'",
+		},
+		LogFile: LogFileConfig{
+			FilePath: filepath.Join(t.TempDir(), "explicit.log"),
+			MaxSize:  1,
+		},
+	}}
 
-	server, err := New(nil)
+	server, err := New(nil, settings)
+	require.NoError(t, err)
+	require.NotNil(t, server)
+	assert.Equal(t, "tcp", server.auditTransport)
+	assert.Equal(t, 7, server.asyncQueueSize)
+	assert.Equal(t, 0, server.asyncWorkers)
+	assert.Equal(t, "wait", server.asyncEnqueueMode)
+	assert.Equal(t, 11*time.Millisecond, server.asyncEnqueueTimeout)
+	assert.Equal(t, 17*time.Millisecond, server.asyncTimeout)
+	assert.True(t, server.asyncDurableEnabled)
+	assert.Equal(t, settings.Async.Durable.Dir, server.asyncDurableDir)
+	assert.Equal(t, 5, server.asyncRetryMaxAttempts)
+	assert.Equal(t, 23*time.Millisecond, server.asyncRetryBackoff)
+	require.Len(t, server.ruleGroups, 1)
+	assert.Equal(t, "explicit", server.ruleGroups[0].Name)
+}
+
+func TestNew_InvalidEnqueueModeFallsBackToDrop(t *testing.T) {
+	settings := DefaultRuntimeSettings()
+	settings.Async.EnqueueMode = "invalid"
+	settings.Async.EnqueueTimeout = 12 * time.Millisecond
+
+	server, err := New(nil, settings)
 	require.NoError(t, err)
 	assert.Equal(t, "drop", server.asyncEnqueueMode)
 	assert.Equal(t, 12*time.Millisecond, server.asyncEnqueueTimeout)
 }
 
 func TestSideQueue_DropsWhenFull(t *testing.T) {
-	viper.Reset()
-	viper.Set("async.queue_size", 1)
 	oldWorkers := defaultSideWorkers
 	defaultSideWorkers = 0
 	defer func() { defaultSideWorkers = oldWorkers }()
 
-	viper.Set("rule_groups", []map[string]interface{}{
+	settings := DefaultRuntimeSettings()
+	settings.Async.QueueSize = 1
+	settings.Async.Workers = 0
+	settings.RuleGroups = []RuleGroupConfig{
 		{
-			"name":     "rg",
-			"rules":    []string{"true"},
-			"log_file": map[string]interface{}{"file_path": "/tmp/test.log", "max_size": 1},
-			"messaging": map[string]interface{}{
-				"type":        "slack_webhook",
-				"webhook_url": "http://example.com",
-			},
+			Name:      "rg",
+			Rules:     []string{"true"},
+			LogFile:   LogFileConfig{FilePath: "/tmp/test.log", MaxSize: 1},
+			Messaging: Messaging{Type: "slack_webhook", WebhookURL: "http://example.com"},
 		},
-	})
+	}
 
-	srv, err := New(nil)
+	srv, err := New(nil, settings)
 	require.NoError(t, err)
 
 	frame := []byte(`{"type":"request","time":"2000-01-01T00:00:00Z","auth":{},"request":{},"response":{}}`)
@@ -510,21 +529,18 @@ func TestSideQueue_DropsWhenFull(t *testing.T) {
 }
 
 func TestReact_AsyncMessengerCalled(t *testing.T) {
-	viper.Reset()
-	viper.Set("async.queue_size", 10)
-	viper.Set("rule_groups", []map[string]interface{}{
+	settings := DefaultRuntimeSettings()
+	settings.Async.QueueSize = 10
+	settings.RuleGroups = []RuleGroupConfig{
 		{
-			"name":     "rg",
-			"rules":    []string{"true"},
-			"log_file": map[string]interface{}{"file_path": "/tmp/test.log", "max_size": 1},
-			"messaging": map[string]interface{}{
-				"type":        "slack_webhook",
-				"webhook_url": "http://example.com",
-			},
+			Name:      "rg",
+			Rules:     []string{"true"},
+			LogFile:   LogFileConfig{FilePath: "/tmp/test.log", MaxSize: 1},
+			Messaging: Messaging{Type: "slack_webhook", WebhookURL: "http://example.com"},
 		},
-	})
+	}
 
-	srv, err := New(nil)
+	srv, err := New(nil, settings)
 	require.NoError(t, err)
 
 	called := make(chan struct{}, 1)
@@ -547,22 +563,19 @@ func TestReact_AsyncMessengerCalled(t *testing.T) {
 }
 
 func TestNew_AsyncWorkersCanBeDisabled(t *testing.T) {
-	viper.Reset()
-	viper.Set("async.queue_size", 10)
-	viper.Set("async.workers", 0)
-	viper.Set("rule_groups", []map[string]interface{}{
+	settings := DefaultRuntimeSettings()
+	settings.Async.QueueSize = 10
+	settings.Async.Workers = 0
+	settings.RuleGroups = []RuleGroupConfig{
 		{
-			"name":     "rg",
-			"rules":    []string{"true"},
-			"log_file": map[string]interface{}{"file_path": "/tmp/test.log", "max_size": 1},
-			"messaging": map[string]interface{}{
-				"type":        "slack_webhook",
-				"webhook_url": "http://example.com",
-			},
+			Name:      "rg",
+			Rules:     []string{"true"},
+			LogFile:   LogFileConfig{FilePath: "/tmp/test.log", MaxSize: 1},
+			Messaging: Messaging{Type: "slack_webhook", WebhookURL: "http://example.com"},
 		},
-	})
+	}
 
-	srv, err := New(nil)
+	srv, err := New(nil, settings)
 	require.NoError(t, err)
 
 	called := make(chan struct{}, 1)
@@ -585,26 +598,23 @@ func TestNew_AsyncWorkersCanBeDisabled(t *testing.T) {
 }
 
 func TestNew_AsyncWorkersCanOverrideDefault(t *testing.T) {
-	viper.Reset()
-	viper.Set("async.queue_size", 10)
-	viper.Set("async.workers", 1)
-	viper.Set("rule_groups", []map[string]interface{}{
+	settings := DefaultRuntimeSettings()
+	settings.Async.QueueSize = 10
+	settings.Async.Workers = 1
+	settings.RuleGroups = []RuleGroupConfig{
 		{
-			"name":     "rg",
-			"rules":    []string{"true"},
-			"log_file": map[string]interface{}{"file_path": "/tmp/test.log", "max_size": 1},
-			"messaging": map[string]interface{}{
-				"type":        "slack_webhook",
-				"webhook_url": "http://example.com",
-			},
+			Name:      "rg",
+			Rules:     []string{"true"},
+			LogFile:   LogFileConfig{FilePath: "/tmp/test.log", MaxSize: 1},
+			Messaging: Messaging{Type: "slack_webhook", WebhookURL: "http://example.com"},
 		},
-	})
+	}
 
 	oldWorkers := defaultSideWorkers
 	defaultSideWorkers = 0
 	defer func() { defaultSideWorkers = oldWorkers }()
 
-	srv, err := New(nil)
+	srv, err := New(nil, settings)
 	require.NoError(t, err)
 
 	called := make(chan struct{}, 1)
@@ -627,56 +637,98 @@ func TestNew_AsyncWorkersCanOverrideDefault(t *testing.T) {
 }
 
 func TestEnqueueSide_DropMode_DropsImmediatelyWhenFull(t *testing.T) {
-	as := &AuditServer{
-		sideQueue: make(chan sideTask, 1),
-	}
-	as.sideQueue <- sideTask{}
+	processor := newSideEffectProcessor(sideEffectProcessorConfig{
+		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		queueSize: 1,
+	})
+	processor.queue <- sideTask{}
 
 	start := time.Now()
-	ok := as.enqueueSide(sideTask{})
+	ok := processor.Submit(sideEffectRequest{})
 	elapsed := time.Since(start)
 
 	assert.False(t, ok)
-	assert.Equal(t, uint64(1), as.sideDrops.Load())
+	assert.Equal(t, uint64(1), processor.Drops())
 	assert.Less(t, elapsed, 10*time.Millisecond)
 }
 
+func TestSideEffectProcessor_MirrorsDropAndTaskSequence(t *testing.T) {
+	var drops atomic.Uint64
+	var seq atomic.Uint64
+	var queue chan sideTask
+	var mode string
+	var timeout time.Duration
+
+	processor := newSideEffectProcessor(sideEffectProcessorConfig{
+		logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		queueSize:            1,
+		enqueueMode:          "wait",
+		enqueueTimeout:       7 * time.Millisecond,
+		mirrorDrops:          &drops,
+		mirrorTaskSeq:        &seq,
+		mirrorQueue:          &queue,
+		mirrorEnqueueMode:    &mode,
+		mirrorEnqueueTimeout: &timeout,
+	})
+
+	require.NotNil(t, queue)
+	assert.Equal(t, "wait", mode)
+	assert.Equal(t, 7*time.Millisecond, timeout)
+	id := processor.nextTaskID()
+	assert.True(t, strings.HasSuffix(id, "-1"))
+
+	processor.queue <- sideTask{}
+	ok := processor.Submit(sideEffectRequest{})
+	assert.False(t, ok)
+	assert.Equal(t, uint64(1), processor.Drops())
+	assert.Equal(t, uint64(1), drops.Load())
+}
+
+func TestSideEffectProcessor_DefaultQueueSize(t *testing.T) {
+	processor := newSideEffectProcessor(sideEffectProcessorConfig{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	assert.Equal(t, defaultAsyncQueueSize, cap(processor.queue))
+}
+
 func TestEnqueueSide_WaitMode_TimesOutWhenFull(t *testing.T) {
-	as := &AuditServer{
-		sideQueue:           make(chan sideTask, 1),
-		asyncEnqueueMode:    "wait",
-		asyncEnqueueTimeout: 30 * time.Millisecond,
-	}
-	as.sideQueue <- sideTask{}
+	processor := newSideEffectProcessor(sideEffectProcessorConfig{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		queueSize:      1,
+		enqueueMode:    "wait",
+		enqueueTimeout: 30 * time.Millisecond,
+	})
+	processor.queue <- sideTask{}
 
 	start := time.Now()
-	ok := as.enqueueSide(sideTask{})
+	ok := processor.enqueue(sideTask{})
 	elapsed := time.Since(start)
 
 	assert.False(t, ok)
-	assert.Equal(t, uint64(1), as.sideDrops.Load())
+	assert.Equal(t, uint64(1), processor.Drops())
 	assert.GreaterOrEqual(t, elapsed, 25*time.Millisecond)
 }
 
 func TestEnqueueSide_WaitMode_EnqueuesWhenCapacityFrees(t *testing.T) {
-	as := &AuditServer{
-		sideQueue:           make(chan sideTask, 1),
-		asyncEnqueueMode:    "wait",
-		asyncEnqueueTimeout: 200 * time.Millisecond,
-	}
-	as.sideQueue <- sideTask{}
+	processor := newSideEffectProcessor(sideEffectProcessorConfig{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		queueSize:      1,
+		enqueueMode:    "wait",
+		enqueueTimeout: 200 * time.Millisecond,
+	})
+	processor.queue <- sideTask{}
 
 	go func() {
 		time.Sleep(25 * time.Millisecond)
-		<-as.sideQueue
+		<-processor.queue
 	}()
 
 	start := time.Now()
-	ok := as.enqueueSide(sideTask{})
+	ok := processor.enqueue(sideTask{})
 	elapsed := time.Since(start)
 
 	assert.True(t, ok)
-	assert.Equal(t, uint64(0), as.sideDrops.Load())
+	assert.Equal(t, uint64(0), processor.Drops())
 	assert.GreaterOrEqual(t, elapsed, 20*time.Millisecond)
 	assert.Less(t, elapsed, 200*time.Millisecond)
 }
@@ -685,20 +737,20 @@ func TestEnqueueSide_DurableMode_PersistsWhenQueueFull(t *testing.T) {
 	store, err := newFileSideTaskStore(t.TempDir())
 	require.NoError(t, err)
 
-	as := &AuditServer{
-		logger:              slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
-		sideQueue:           make(chan sideTask, 1),
-		asyncDurableEnabled: true,
-		asyncRetryBackoff:   20 * time.Millisecond,
-		sideStore:           store,
-	}
-	as.sideQueue <- sideTask{}
+	processor := newSideEffectProcessor(sideEffectProcessorConfig{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		queueSize:      1,
+		durableEnabled: true,
+		retryBackoff:   20 * time.Millisecond,
+		store:          store,
+	})
+	processor.queue <- sideTask{}
 
-	ok := as.enqueueSide(sideTask{groupName: "g", payload: []byte("x"), payloadStr: "x"})
+	ok := processor.enqueue(sideTask{groupName: "g", payload: []byte("x"), payloadStr: "x"})
 	require.True(t, ok)
-	assert.Equal(t, uint64(0), as.sideDrops.Load())
+	assert.Equal(t, uint64(0), processor.Drops())
 
-	tasks, err := as.sideStore.Pending()
+	tasks, err := store.Pending()
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 }
@@ -707,15 +759,15 @@ func TestProcessSideTask_DurableRetryToDeadLetter(t *testing.T) {
 	store, err := newFileSideTaskStore(t.TempDir())
 	require.NoError(t, err)
 
-	as := &AuditServer{
-		logger:                slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
-		sideQueue:             make(chan sideTask, 8),
-		asyncDurableEnabled:   true,
-		asyncRetryMaxAttempts: 2,
-		asyncRetryBackoff:     20 * time.Millisecond,
-		sideStore:             store,
-	}
-	as.startSideWorkers(1)
+	processor := newSideEffectProcessor(sideEffectProcessorConfig{
+		logger:           slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		queueSize:        8,
+		durableEnabled:   true,
+		retryMaxAttempts: 2,
+		retryBackoff:     20 * time.Millisecond,
+		store:            store,
+	})
+	processor.startWorkers(1)
 
 	task := sideTask{
 		id:         "task-1",
@@ -724,12 +776,12 @@ func TestProcessSideTask_DurableRetryToDeadLetter(t *testing.T) {
 		payloadStr: "x",
 		messenger:  &dummyMessenger{sendErr: errors.New("boom")},
 	}
-	require.NoError(t, as.sideStore.Save(task))
+	require.NoError(t, store.Save(task))
 
-	as.processSideTask(task)
+	processor.process(task)
 
 	require.Eventually(t, func() bool {
-		pending, err := as.sideStore.Pending()
+		pending, err := store.Pending()
 		if err != nil {
 			return false
 		}
@@ -746,30 +798,32 @@ func TestReplayDurablePending_ReplaysStoredTasks(t *testing.T) {
 	require.NoError(t, err)
 
 	msg := &dummyMessenger{}
-	as := &AuditServer{
-		logger:                slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
-		sideQueue:             make(chan sideTask, 8),
-		asyncDurableEnabled:   true,
-		asyncRetryMaxAttempts: 2,
-		asyncRetryBackoff:     10 * time.Millisecond,
-		sideStore:             store,
-		ruleGroups: []RuleGroup{{
-			Name:      "g",
-			Messenger: msg,
-		}},
-	}
-	as.startSideWorkers(1)
+	processor := newSideEffectProcessor(sideEffectProcessorConfig{
+		logger:           slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		queueSize:        8,
+		durableEnabled:   true,
+		retryMaxAttempts: 2,
+		retryBackoff:     10 * time.Millisecond,
+		store:            store,
+		adapterResolver: func(groupName string) sideTaskAdapters {
+			if groupName == "g" {
+				return sideTaskAdapters{messenger: msg}
+			}
+			return sideTaskAdapters{}
+		},
+	})
+	processor.startWorkers(1)
 
-	require.NoError(t, as.sideStore.Save(sideTask{id: "task-a", groupName: "g", payload: []byte("a"), payloadStr: "a"}))
-	require.NoError(t, as.sideStore.Save(sideTask{id: "task-b", groupName: "g", payload: []byte("b"), payloadStr: "b"}))
+	require.NoError(t, store.Save(sideTask{id: "task-a", groupName: "g", payload: []byte("a"), payloadStr: "a"}))
+	require.NoError(t, store.Save(sideTask{id: "task-b", groupName: "g", payload: []byte("b"), payloadStr: "b"}))
 
-	as.replayDurablePending()
+	processor.replayDurablePending()
 
 	require.Eventually(t, func() bool {
 		return msg.Calls() == 2
 	}, 2*time.Second, 25*time.Millisecond)
 
-	pending, err := as.sideStore.Pending()
+	pending, err := store.Pending()
 	require.NoError(t, err)
 	assert.Len(t, pending, 0)
 }
@@ -806,26 +860,18 @@ func TestNewWithoutLogger(t *testing.T) {
 }
 
 func TestNew_WithRuleGroups(t *testing.T) {
-	// Set up a mock configuration
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	settings := testRuntimeSettings([]RuleGroupConfig{
 		{
-			"name": "test_group",
-			"rules": []string{
+			Name: "test_group",
+			Rules: []string{
 				"Request.Operation == 'read'",
 			},
-			"log_file": map[string]interface{}{
-				"file_path": "/tmp/test.log",
-				"max_size":  10,
-			},
-			"forwarding": map[string]interface{}{
-				"enabled": true,
-				"address": "127.0.0.1:9000",
-			},
+			LogFile:    LogFileConfig{FilePath: "/tmp/test.log", MaxSize: 10},
+			Forwarding: ForwardingConfig{Enabled: true, Address: "127.0.0.1:9000"},
 		},
 	})
 
-	server, err := New(nil)
+	server, err := New(nil, settings)
 
 	assert.NoError(t, err)
 	assert.NotNil(t, server)
@@ -836,47 +882,30 @@ func TestNew_WithRuleGroups(t *testing.T) {
 	assert.NotNil(t, server.ruleGroups[0].Forwarder)
 }
 
-func TestNew_WithInvalidRuleGroups(t *testing.T) {
-	// Set up an invalid configuration
-	viper.Reset()
-	viper.Set("rule_groups", "invalid_value")
-
+func TestNew_WithTooManyRuntimeSettings(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	server, err := New(logger)
+	server, err := New(logger, DefaultRuntimeSettings(), DefaultRuntimeSettings())
 
 	assert.Error(t, err)
 	assert.Nil(t, server)
-	assert.Contains(t, err.Error(), "failed to load rule groups")
-
-	// Verify error was logged
-	logOutput := buf.String()
-	assert.Contains(t, logOutput, "Failed to load rule groups")
-	assert.Contains(t, logOutput, "ERROR")
+	assert.Contains(t, err.Error(), "expected at most one runtime settings")
 }
 
 func TestNew_WithValidForwarder(t *testing.T) {
-	// Set up a mock configuration with a valid forwarder address
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	settings := testRuntimeSettings([]RuleGroupConfig{
 		{
-			"name": "test_group",
-			"rules": []string{
+			Name: "test_group",
+			Rules: []string{
 				"Request.Operation == 'read'",
 			},
-			"log_file": map[string]interface{}{
-				"file_path": "/tmp/test.log",
-				"max_size":  10,
-			},
-			"forwarding": map[string]interface{}{
-				"enabled": true,
-				"address": "127.0.0.1:9000",
-			},
+			LogFile:    LogFileConfig{FilePath: "/tmp/test.log", MaxSize: 10},
+			Forwarding: ForwardingConfig{Enabled: true, Address: "127.0.0.1:9000"},
 		},
 	})
 
-	server, err := New(nil)
+	server, err := New(nil, settings)
 
 	assert.NoError(t, err)
 	assert.NotNil(t, server)
@@ -885,29 +914,21 @@ func TestNew_WithValidForwarder(t *testing.T) {
 }
 
 func TestNew_WithInvalidForwarder(t *testing.T) {
-	// Set up a mock configuration with an invalid forwarder address
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	settings := testRuntimeSettings([]RuleGroupConfig{
 		{
-			"name": "test_group",
-			"rules": []string{
+			Name: "test_group",
+			Rules: []string{
 				"Request.Operation == 'read'",
 			},
-			"log_file": map[string]interface{}{
-				"file_path": "/tmp/test.log",
-				"max_size":  10,
-			},
-			"forwarding": map[string]interface{}{
-				"enabled": true,
-				"address": "invalid:address:9000",
-			},
+			LogFile:    LogFileConfig{FilePath: "/tmp/test.log", MaxSize: 10},
+			Forwarding: ForwardingConfig{Enabled: true, Address: "invalid:address:9000"},
 		},
 	})
 
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	server, err := New(logger)
+	server, err := New(logger, settings)
 
 	assert.Error(t, err)
 	assert.Nil(t, server)
@@ -920,26 +941,18 @@ func TestNew_WithInvalidForwarder(t *testing.T) {
 }
 
 func TestNew_WithDisabledForwarder(t *testing.T) {
-	// Set up a mock configuration with forwarding disabled
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	settings := testRuntimeSettings([]RuleGroupConfig{
 		{
-			"name": "test_group",
-			"rules": []string{
+			Name: "test_group",
+			Rules: []string{
 				"Request.Operation == 'read'",
 			},
-			"log_file": map[string]interface{}{
-				"file_path": "/tmp/test.log",
-				"max_size":  10,
-			},
-			"forwarding": map[string]interface{}{
-				"enabled": false,
-				"address": "127.0.0.1:9000",
-			},
+			LogFile:    LogFileConfig{FilePath: "/tmp/test.log", MaxSize: 10},
+			Forwarding: ForwardingConfig{Enabled: false, Address: "127.0.0.1:9000"},
 		},
 	})
 
-	server, err := New(nil)
+	server, err := New(nil, settings)
 
 	assert.NoError(t, err)
 	assert.NotNil(t, server)
@@ -1099,9 +1112,6 @@ func TestAuditServer_React_WithForwarding(t *testing.T) {
 		},
 	}
 
-	// Initialize viper with the rule group configurations
-	viper.Set("rule_groups", ruleGroupConfigs)
-
 	testCases := []struct {
 		name              string
 		input             AuditLog
@@ -1182,7 +1192,7 @@ func TestAuditServer_React_WithForwarding(t *testing.T) {
 
 			// Create the AuditServer
 			logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-			as, _ := New(logger)
+			as, _ := New(logger, testRuntimeSettings(ruleGroupConfigs))
 
 			// Replace the forwarders with our mocks
 			as.ruleGroups[0].Forwarder = mockForwarder1
@@ -1269,6 +1279,38 @@ type dummyForwarder struct {
 	calls      int
 }
 
+type captureSideEffects struct {
+	requests []sideEffectRequest
+}
+
+func (c *captureSideEffects) submitSideEffect(req sideEffectRequest) bool {
+	c.requests = append(c.requests, req)
+	return true
+}
+
+func attachTestSideProcessor(srv *AuditServer, queueSize, workers int) {
+	if queueSize <= 0 {
+		queueSize = 1
+	}
+	srv.sideProcessor = newSideEffectProcessor(sideEffectProcessorConfig{
+		logger:               srv.logger,
+		queueSize:            queueSize,
+		enqueueMode:          srv.asyncEnqueueMode,
+		enqueueTimeout:       srv.asyncEnqueueTimeout,
+		durableEnabled:       srv.asyncDurableEnabled,
+		retryMaxAttempts:     srv.asyncRetryMaxAttempts,
+		retryBackoff:         srv.asyncRetryBackoff,
+		store:                srv.sideStore,
+		adapterResolver:      srv.resolveSideTaskAdapters,
+		mirrorDrops:          &srv.sideDrops,
+		mirrorTaskSeq:        &srv.sideTaskSeq,
+		mirrorQueue:          &srv.sideQueue,
+		mirrorEnqueueMode:    &srv.asyncEnqueueMode,
+		mirrorEnqueueTimeout: &srv.asyncEnqueueTimeout,
+	})
+	srv.sideProcessor.startWorkers(workers)
+}
+
 type errWriter struct{}
 
 func (e errWriter) Write(_ []byte) (int, error) {
@@ -1308,6 +1350,44 @@ func (c *fakeTrafficConn) Context() any {
 
 func (c *fakeTrafficConn) SetContext(ctx any) {
 	c.ctx = ctx
+}
+
+type captureFrameHandler struct {
+	frames [][]byte
+}
+
+func (h *captureFrameHandler) handleFrame(frame []byte) gnet.Action {
+	h.frames = append(h.frames, append([]byte(nil), frame...))
+	return gnet.None
+}
+
+func TestTransportAdapter_TCPFrameExtraction(t *testing.T) {
+	handler := &captureFrameHandler{}
+	transport := newTransportAdapter("tcp", slog.New(slog.NewTextHandler(io.Discard, nil)), handler)
+
+	lineA := []byte(`{"type":"request","time":"a"}`)
+	lineB := []byte(`{"type":"request","time":"b"}`)
+	remaining := transport.handleTCPStream(append(append(append(lineA, '\n'), lineB...), '\r', '\n'), nil)
+
+	require.Empty(t, remaining)
+	require.Len(t, handler.frames, 2)
+	assert.Equal(t, lineA, handler.frames[0])
+	assert.Equal(t, lineB, handler.frames[1])
+
+	lineC := []byte(`{"type":"request","time":"c"}`)
+	carry := transport.handleTCPStream(lineC[:10], nil)
+	require.NotEmpty(t, carry)
+	carry = transport.handleTCPStream(append(lineC[10:], '\n'), carry)
+
+	require.Empty(t, carry)
+	require.Len(t, handler.frames, 3)
+	assert.Equal(t, lineC, handler.frames[2])
+}
+
+func TestTransportAdapter_NilHandlerCloses(t *testing.T) {
+	transport := newTransportAdapter("udp", slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	action := transport.OnTraffic(&fakeTrafficConn{frame: auditFrame()})
+	assert.Equal(t, gnet.Close, action)
 }
 
 // minimal JSON frame that parses into an AuditLog
@@ -1416,9 +1496,8 @@ func TestReact_Branches(t *testing.T) {
 			srv := &AuditServer{
 				logger:     logger,
 				ruleGroups: []RuleGroup{tc.group},
-				sideQueue:  make(chan sideTask, 2),
 			}
-			srv.startSideWorkers(1)
+			attachTestSideProcessor(srv, 2, 1)
 
 			_, act := srv.React(frame, nil)
 			require.Equal(t, tc.wantAction, act)
@@ -1439,6 +1518,55 @@ func TestReact_Branches(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRuleGroupExecutor_ExecuteWritesAndSubmitsSideEffects(t *testing.T) {
+	frame := auditFrame()
+	writer := new(bytes.Buffer)
+	msg := &dummyMessenger{}
+	fwd := &dummyForwarder{}
+	submitter := &captureSideEffects{}
+	executor := newRuleGroupExecutor([]RuleGroup{{
+		Name:          "all",
+		CompiledRules: nil,
+		Writer:        writer,
+		Messenger:     msg,
+		Forwarder:     fwd,
+	}}, slog.New(slog.NewTextHandler(io.Discard, nil)), submitter)
+
+	indexes := executor.Match(&AuditLog{})
+	require.Equal(t, []int{0}, indexes)
+
+	executor.Execute(frame, indexes)
+
+	assert.Equal(t, string(frame), writer.String())
+	require.Len(t, submitter.requests, 1)
+	assert.Equal(t, "all", submitter.requests[0].groupName)
+	assert.Equal(t, frame, submitter.requests[0].payload)
+	assert.Equal(t, string(frame), submitter.requests[0].payloadStr)
+	assert.Same(t, msg, submitter.requests[0].messenger)
+	assert.Same(t, fwd, submitter.requests[0].forwarder)
+}
+
+func TestRuleGroupExecutor_ExecuteSkipsInvalidIndexes(t *testing.T) {
+	writer := new(bytes.Buffer)
+	executor := newRuleGroupExecutor([]RuleGroup{{
+		Name:   "all",
+		Writer: writer,
+	}}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+
+	executor.Execute(auditFrame(), []int{-1, 1})
+	assert.Empty(t, writer.String())
+}
+
+func TestRuleGroupPayload_StringUsesCopiedPayload(t *testing.T) {
+	frame := []byte("original")
+	payload := ruleGroupPayload{frame: frame}
+	copied := payload.Bytes()
+	frame[0] = 'O'
+
+	assert.Equal(t, "original", string(copied))
+	assert.Equal(t, "original", payload.String())
 }
 
 func TestReact_WriteErrorAndLoggerPayloadBranches(t *testing.T) {
@@ -1471,15 +1599,27 @@ func TestReact_WriteErrorAndLoggerPayloadBranches(t *testing.T) {
 				Writer:        nil,
 				Messenger:     msg,
 			}},
-			sideQueue: make(chan sideTask, 1),
 		}
-		srv.startSideWorkers(1)
+		attachTestSideProcessor(srv, 1, 1)
 
 		_, action := srv.React(frame, nil)
 		require.Equal(t, gnet.None, action)
 		require.Eventually(t, func() bool { return msg.Calls() == 1 }, time.Second, 10*time.Millisecond)
 		require.Contains(t, buf.String(), string(frame))
 	})
+}
+
+func TestAuditServer_SideEffectAndAdapterFallbackBranches(t *testing.T) {
+	srv := &AuditServer{
+		ruleGroups: []RuleGroup{{Name: "known", Messenger: &dummyMessenger{}, Forwarder: &dummyForwarder{}}},
+	}
+
+	assert.False(t, srv.submitSideEffect(sideEffectRequest{}))
+	assert.Equal(t, sideTaskAdapters{}, srv.resolveSideTaskAdapters("missing"))
+
+	adapters := srv.resolveSideTaskAdapters("known")
+	assert.NotNil(t, adapters.messenger)
+	assert.NotNil(t, adapters.forwarder)
 }
 
 func TestRuleGroup_shouldLog_RuntimeErrorContinues(t *testing.T) {
@@ -1521,62 +1661,51 @@ func TestAuditServer_HandleTCPStream(t *testing.T) {
 }
 
 func TestNew_AuditTransportConfiguration(t *testing.T) {
-	viper.Reset()
 	server, err := New(nil)
 	require.NoError(t, err)
 	assert.Equal(t, "udp", server.auditTransport)
 
-	viper.Reset()
-	viper.Set("vault.audit_protocol", "tcp")
-	server, err = New(nil)
+	settings := DefaultRuntimeSettings()
+	settings.AuditProtocol = "tcp"
+	server, err = New(nil, settings)
 	require.NoError(t, err)
 	assert.Equal(t, "tcp", server.auditTransport)
 
-	viper.Reset()
-	viper.Set("vault.audit_protocol", "invalid")
+	settings.AuditProtocol = "invalid"
 	logBuffer := new(bytes.Buffer)
 	logger := slog.New(slog.NewTextHandler(logBuffer, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	server, err = New(logger)
+	server, err = New(logger, settings)
 	require.NoError(t, err)
 	assert.Equal(t, "udp", server.auditTransport)
 	assert.Contains(t, logBuffer.String(), "Invalid vault.audit_protocol")
 }
 
 func TestNew_AsyncEnqueueModeBlankFallsBackToDrop(t *testing.T) {
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{})
-	viper.Set("async.enqueue_mode", "   ")
+	settings := DefaultRuntimeSettings()
+	settings.Async.EnqueueMode = "   "
 
-	server, err := New(nil)
+	server, err := New(nil, settings)
 	require.NoError(t, err)
 	assert.Equal(t, "drop", server.asyncEnqueueMode)
 }
 
 func TestNew_WithSlackMessengerAndDurableEnabled(t *testing.T) {
-	viper.Reset()
-	viper.Set("async.durable.enabled", true)
-	viper.Set("async.durable.dir", t.TempDir())
-	viper.Set("async.timeout", "17ms")
-	viper.Set("rule_groups", []map[string]interface{}{
+	settings := DefaultRuntimeSettings()
+	settings.Async.Durable.Enabled = true
+	settings.Async.Durable.Dir = t.TempDir()
+	settings.Async.Timeout = 17 * time.Millisecond
+	settings.RuleGroups = []RuleGroupConfig{
 		{
-			"name": "slack_group",
-			"rules": []string{
+			Name: "slack_group",
+			Rules: []string{
 				"true",
 			},
-			"log_file": map[string]interface{}{
-				"file_path": filepath.Join(t.TempDir(), "slack.log"),
-				"max_size":  1,
-			},
-			"messaging": map[string]interface{}{
-				"type":    "slack",
-				"url":     "https://example.invalid",
-				"token":   "tok",
-				"channel": "chan",
-			},
+			LogFile:   LogFileConfig{FilePath: filepath.Join(t.TempDir(), "slack.log"), MaxSize: 1},
+			Messaging: Messaging{Type: "slack", URL: "https://example.invalid", Token: "tok", Channel: "chan"},
 		},
-	})
+	}
 
-	server, err := New(nil)
+	server, err := New(nil, settings)
 	require.NoError(t, err)
 	require.NotNil(t, server.sideStore)
 	require.True(t, server.asyncDurableEnabled)
@@ -1585,48 +1714,47 @@ func TestNew_WithSlackMessengerAndDurableEnabled(t *testing.T) {
 }
 
 func TestNew_DurableStoreCreationFailure(t *testing.T) {
-	viper.Reset()
-	viper.Set("async.durable.enabled", true)
 	badBase := filepath.Join(t.TempDir(), "base-file")
 	require.NoError(t, os.WriteFile(badBase, []byte("x"), 0o600))
-	viper.Set("async.durable.dir", badBase)
-	viper.Set("rule_groups", []map[string]interface{}{})
+	settings := DefaultRuntimeSettings()
+	settings.Async.Durable.Enabled = true
+	settings.Async.Durable.Dir = badBase
 
-	server, err := New(nil)
+	server, err := New(nil, settings)
 	require.Error(t, err)
 	assert.Nil(t, server)
 	assert.Contains(t, err.Error(), "failed to create durable side task store")
 }
 
 func TestEnqueueSide_WaitMode_DefaultTimeoutBranch(t *testing.T) {
-	as := &AuditServer{
-		sideQueue:           make(chan sideTask, 1),
-		asyncEnqueueMode:    "wait",
-		asyncEnqueueTimeout: 0,
-	}
-	as.sideQueue <- sideTask{}
+	processor := newSideEffectProcessor(sideEffectProcessorConfig{
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		queueSize:   1,
+		enqueueMode: "wait",
+	})
+	processor.queue <- sideTask{}
 
 	start := time.Now()
-	ok := as.enqueueSide(sideTask{})
+	ok := processor.enqueue(sideTask{})
 	elapsed := time.Since(start)
 
 	assert.False(t, ok)
 	assert.GreaterOrEqual(t, elapsed, 4*time.Millisecond)
-	assert.Equal(t, uint64(1), as.sideDrops.Load())
+	assert.Equal(t, uint64(1), processor.Drops())
 }
 
 func TestProcessSideTask_RetrySaveErrorBranch(t *testing.T) {
 	store := &errSideTaskStore{saveErr: errors.New("save failed")}
-	as := &AuditServer{
-		logger:                slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
-		sideQueue:             make(chan sideTask, 1),
-		asyncDurableEnabled:   true,
-		asyncRetryMaxAttempts: 3,
-		asyncRetryBackoff:     10 * time.Millisecond,
-		sideStore:             store,
-	}
+	processor := newSideEffectProcessor(sideEffectProcessorConfig{
+		logger:           slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		queueSize:        1,
+		durableEnabled:   true,
+		retryMaxAttempts: 3,
+		retryBackoff:     10 * time.Millisecond,
+		store:            store,
+	})
 
-	as.processSideTask(sideTask{
+	processor.process(sideTask{
 		id:         "task-r1",
 		groupName:  "g",
 		payload:    []byte("x"),
@@ -1742,19 +1870,25 @@ func (s *errSideTaskStore) Pending() ([]sideTask, error) {
 }
 
 func TestNew_AsyncInvalidConfigFallsBackToDefaults(t *testing.T) {
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{})
-	viper.Set("async.queue_size", 0)
-	viper.Set("async.workers", -3)
-	viper.Set("async.enqueue_mode", "invalid")
-	viper.Set("async.enqueue_timeout", "not-a-duration")
-	viper.Set("async.timeout", "also-bad")
-	viper.Set("async.durable.enabled", false)
-	viper.Set("async.durable.dir", "")
-	viper.Set("async.retry.max_attempts", 0)
-	viper.Set("async.retry.backoff", "bad")
+	settings := RuntimeSettings{
+		Async: AsyncSettings{
+			QueueSize:      0,
+			Workers:        -3,
+			EnqueueMode:    "invalid",
+			EnqueueTimeout: 0,
+			Timeout:        0,
+			Durable: DurableSettings{
+				Enabled: false,
+				Dir:     "",
+			},
+			Retry: RetrySettings{
+				MaxAttempts: 0,
+				Backoff:     0,
+			},
+		},
+	}
 
-	server, err := New(nil)
+	server, err := New(nil, settings)
 	require.NoError(t, err)
 	require.NotNil(t, server)
 	assert.Equal(t, 20, server.asyncQueueSize)
@@ -1769,34 +1903,34 @@ func TestNew_AsyncInvalidConfigFallsBackToDefaults(t *testing.T) {
 
 func TestEnqueueSide_DurableSaveFailureReturnsFalse(t *testing.T) {
 	store := &errSideTaskStore{saveErr: errors.New("save failed")}
-	as := &AuditServer{
-		logger:              slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
-		sideQueue:           make(chan sideTask, 1),
-		asyncDurableEnabled: true,
-		sideStore:           store,
-	}
+	processor := newSideEffectProcessor(sideEffectProcessorConfig{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		queueSize:      1,
+		durableEnabled: true,
+		store:          store,
+	})
 
-	ok := as.enqueueSide(sideTask{id: "task-1"})
+	ok := processor.enqueue(sideTask{id: "task-1"})
 	assert.False(t, ok)
-	assert.Equal(t, uint64(0), as.sideDrops.Load())
+	assert.Equal(t, uint64(0), processor.Drops())
 }
 
 func TestEnqueueSide_WaitMode_DurableTimeoutReturnsTrue(t *testing.T) {
 	store := &errSideTaskStore{}
-	as := &AuditServer{
-		logger:              slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
-		sideQueue:           make(chan sideTask, 1),
-		asyncEnqueueMode:    "wait",
-		asyncEnqueueTimeout: 2 * time.Millisecond,
-		asyncDurableEnabled: true,
-		asyncRetryBackoff:   1 * time.Millisecond,
-		sideStore:           store,
-	}
-	as.sideQueue <- sideTask{id: "occupied"}
+	processor := newSideEffectProcessor(sideEffectProcessorConfig{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		queueSize:      1,
+		enqueueMode:    "wait",
+		enqueueTimeout: 2 * time.Millisecond,
+		durableEnabled: true,
+		retryBackoff:   1 * time.Millisecond,
+		store:          store,
+	})
+	processor.queue <- sideTask{id: "occupied"}
 
-	ok := as.enqueueSide(sideTask{id: "task-2"})
+	ok := processor.enqueue(sideTask{id: "task-2"})
 	assert.True(t, ok)
-	assert.Equal(t, uint64(0), as.sideDrops.Load())
+	assert.Equal(t, uint64(0), processor.Drops())
 }
 
 func TestFileSideTaskStore_Branches(t *testing.T) {
@@ -1836,15 +1970,15 @@ func TestFileSideTaskStore_Branches(t *testing.T) {
 func TestReplayDurablePending_NoStoreOrPendingError(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	asNoStore := &AuditServer{logger: logger}
-	asNoStore.replayDurablePending()
+	noStore := newSideEffectProcessor(sideEffectProcessorConfig{logger: logger, queueSize: 1})
+	noStore.replayDurablePending()
 
-	asErr := &AuditServer{
+	withErr := newSideEffectProcessor(sideEffectProcessorConfig{
 		logger:    logger,
-		sideQueue: make(chan sideTask, 1),
-		sideStore: &errSideTaskStore{pendingErr: errors.New("boom")},
-	}
-	asErr.replayDurablePending()
+		queueSize: 1,
+		store:     &errSideTaskStore{pendingErr: errors.New("boom")},
+	})
+	withErr.replayDurablePending()
 }
 
 func TestOnTraffic(t *testing.T) {

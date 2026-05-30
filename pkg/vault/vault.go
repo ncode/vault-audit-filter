@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
+	"strings"
 
 	vault "github.com/hashicorp/vault/api"
 )
@@ -40,6 +42,14 @@ type CertAuth struct {
 type JWTAuth struct {
 	Role string
 	JWT  string
+}
+
+type SocketAuditDeviceSpec struct {
+	Path        string
+	Address     string
+	Protocol    string
+	Description string
+	LogRaw      bool
 }
 
 func (t TokenAuth) Authenticate(client *vault.Client) error {
@@ -164,4 +174,18 @@ func (vc *VaultClient) EnableAuditDevice(path, type_, description string, option
 	}
 
 	return nil
+}
+
+func (vc *VaultClient) EnableSocketAuditDevice(spec SocketAuditDeviceSpec) error {
+	protocol := strings.ToLower(strings.TrimSpace(spec.Protocol))
+	if protocol == "" {
+		protocol = "udp"
+	}
+
+	return vc.EnableAuditDevice(spec.Path, "socket", spec.Description, map[string]string{
+		"address":     spec.Address,
+		"socket_type": protocol,
+		"description": spec.Description,
+		"log_raw":     strconv.FormatBool(spec.LogRaw),
+	})
 }

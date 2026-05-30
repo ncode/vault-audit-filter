@@ -34,7 +34,11 @@ var auditServerCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		server, err := auditserver.New(logger)
+		settings, err := auditServerRuntimeSettings()
+		if err != nil {
+			return fmt.Errorf("failed to create audit server: %w", err)
+		}
+		server, err := auditserver.New(logger, settings)
 		if err != nil {
 			return fmt.Errorf("failed to create audit server: %w", err)
 		}
