@@ -26,7 +26,7 @@ jobs:
     needs: unit-tests
     services:
       vault:
-        image: hashicorp/vault:1.21
+        image: hashicorp/vault:2.0
         ports:
           - 8200:8200
         env:
