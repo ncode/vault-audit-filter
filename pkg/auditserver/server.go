@@ -234,10 +234,6 @@ func (as *AuditServer) OnTraffic(c gnet.Conn) (action gnet.Action) {
 	return newTransportAdapter(as.auditTransport, as.logger, as).OnTraffic(c)
 }
 
-func (as *AuditServer) handleTCPStream(frame []byte, carryover []byte) []byte {
-	return newTransportAdapter("tcp", as.logger, as).handleTCPStream(frame, carryover)
-}
-
 func (as *AuditServer) executor() ruleGroupExecutor {
 	if as.ruleExecutor.groups != nil {
 		return as.ruleExecutor
