@@ -15,7 +15,6 @@ import (
 	vaultapi "github.com/hashicorp/vault/api"
 	"github.com/ncode/vault-audit-filter/pkg/auditserver"
 	"github.com/ncode/vault-audit-filter/pkg/vault"
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,7 +32,7 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-func tcpAuditAddressFromListener(listenerAddr net.Addr) string {
+func auditAddressFromListener(listenerAddr net.Addr) string {
 	port := "0"
 	if _, p, err := net.SplitHostPort(listenerAddr.String()); err == nil {
 		port = p
@@ -52,77 +51,204 @@ func tcpListenerHost() string {
 	return "0.0.0.0"
 }
 
-func TestIntegration_VaultConnection(t *testing.T) {
-	vaultAddr := getEnvOrDefault("VAULT_ADDR", defaultVaultAddr)
-	vaultToken := getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)
+func newIntegrationVaultClient(t *testing.T) *vault.VaultClient {
+	t.Helper()
+	client, err := vault.NewVaultClient(
+		getEnvOrDefault("VAULT_ADDR", defaultVaultAddr),
+		vault.TokenAuth{Token: getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)},
+	)
+	require.NoError(t, err)
+	return client
+}
 
-	client, err := vault.NewVaultClient(vaultAddr, vault.TokenAuth{Token: vaultToken})
-	require.NoError(t, err, "Failed to connect to Vault")
-	require.NotNil(t, client)
+func integrationLogFile(path string) auditserver.LogFileConfig {
+	return auditserver.LogFileConfig{
+		FilePath:   path,
+		MaxSize:    10,
+		MaxBackups: 1,
+		MaxAge:     1,
+		Compress:   false,
+	}
+}
+
+func newIntegrationAuditServer(t *testing.T, protocol string, ruleGroups []auditserver.RuleGroupConfig) *auditserver.AuditServer {
+	t.Helper()
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	settings := auditserver.DefaultRuntimeSettings()
+	settings.AuditProtocol = protocol
+	settings.RuleGroups = ruleGroups
+	server, err := auditserver.New(logger, settings)
+	require.NoError(t, err)
+	require.NotNil(t, server)
+	return server
+}
+
+func startUDPAuditListener(t *testing.T, server *auditserver.AuditServer) string {
+	t.Helper()
+	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	conn, err := net.ListenUDP("udp", addr)
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		close(done)
+		_ = conn.Close()
+	})
+
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+				n, _, err := conn.ReadFromUDP(buf)
+				if err != nil {
+					continue
+				}
+				server.React(buf[:n], nil)
+			}
+		}
+	}()
+
+	return auditAddressFromListener(conn.LocalAddr())
+}
+
+func startTCPAuditListener(t *testing.T, server *auditserver.AuditServer) string {
+	t.Helper()
+	tcpListenAddr := net.JoinHostPort(tcpListenerHost(), "0")
+	addr, err := net.ResolveTCPAddr("tcp", tcpListenAddr)
+	require.NoError(t, err)
+
+	listener, err := net.ListenTCP("tcp", addr)
+	require.NoError(t, err)
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		close(stop)
+		_ = listener.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+		}
+	})
+
+	go func() {
+		defer close(done)
+
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 65535)
+		carry := make([]byte, 0)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			n, readErr := conn.Read(buf)
+			if n > 0 {
+				carry = append(carry, buf[:n]...)
+
+				for {
+					idx := bytes.IndexByte(carry, '\n')
+					if idx < 0 {
+						break
+					}
+
+					frame := bytes.TrimSuffix(carry[:idx], []byte{'\r'})
+					if len(frame) > 0 {
+						server.React(frame, nil)
+					}
+
+					if idx+1 >= len(carry) {
+						carry = carry[:0]
+					} else {
+						carry = carry[idx+1:]
+					}
+				}
+			}
+
+			if readErr != nil {
+				if netErr, ok := readErr.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				return
+			}
+		}
+	}()
+
+	return auditAddressFromListener(listener.Addr())
+}
+
+func enableSocketAudit(t *testing.T, client *vault.VaultClient, path, address, protocol, description string) {
+	t.Helper()
+	_ = client.Sys().DisableAudit(path)
+	err := client.EnableSocketAuditDevice(vault.SocketAuditDeviceSpec{
+		Path:        path,
+		Address:     address,
+		Protocol:    protocol,
+		Description: description,
+		LogRaw:      false,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = client.Sys().DisableAudit(path)
+	})
+}
+
+func waitForLogFile(t *testing.T, path string) string {
+	t.Helper()
+	var content []byte
+	require.Eventually(t, func() bool {
+		var err error
+		content, err = os.ReadFile(path)
+		return err == nil && len(content) > 0
+	}, 2*time.Second, 50*time.Millisecond)
+	return string(content)
+}
+
+func readLogFile(path string) string {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(content)
+}
+
+func TestIntegration_VaultConnection(t *testing.T) {
+	client := newIntegrationVaultClient(t)
 
 	// Verify we can list auth methods (proves connection works)
-	_, err = client.Sys().ListAuth()
+	_, err := client.Sys().ListAuth()
 	assert.NoError(t, err, "Failed to list auth methods")
 }
 
 func TestIntegration_EnableAuditDevice(t *testing.T) {
-	vaultAddr := getEnvOrDefault("VAULT_ADDR", defaultVaultAddr)
-	vaultToken := getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)
 	auditAddr := getEnvOrDefault("AUDIT_ADDR", defaultAuditAddr)
 
-	client, err := vault.NewVaultClient(vaultAddr, vault.TokenAuth{Token: vaultToken})
-	require.NoError(t, err)
-
-	// Clean up any existing audit device from previous test runs
-	_ = client.Sys().DisableAudit("integration-test")
-
-	// Enable the audit device
-	err = client.EnableAuditDevice(
-		"integration-test",
-		"socket",
-		"Integration test audit device",
-		map[string]string{
-			"address":     auditAddr,
-			"socket_type": "udp",
-			"log_raw":     "false",
-		},
-	)
-	require.NoError(t, err, "Failed to enable audit device")
+	client := newIntegrationVaultClient(t)
+	enableSocketAudit(t, client, "integration-test", auditAddr, "udp", "Integration test audit device")
 
 	// Verify it was enabled
 	audits, err := client.Sys().ListAudit()
 	require.NoError(t, err)
 	assert.Contains(t, audits, "integration-test/", "Audit device should be enabled")
-
-	// Clean up
-	err = client.Sys().DisableAudit("integration-test")
-	assert.NoError(t, err)
 }
 
 func TestIntegration_AuditDeviceWithSocketConfig(t *testing.T) {
-	vaultAddr := getEnvOrDefault("VAULT_ADDR", defaultVaultAddr)
-	vaultToken := getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)
-
-	// Connect to Vault
-	client, err := vault.NewVaultClient(vaultAddr, vault.TokenAuth{Token: vaultToken})
-	require.NoError(t, err)
-
-	// Clean up any existing audit device
-	_ = client.Sys().DisableAudit("integration-socket-test")
-
-	// Enable audit device with socket configuration
-	// Use a dummy address - we're testing the API works, not actual delivery
-	err = client.EnableAuditDevice(
-		"integration-socket-test",
-		"socket",
-		"Integration socket test",
-		map[string]string{
-			"address":     "127.0.0.1:19999",
-			"socket_type": "udp",
-			"log_raw":     "false",
-		},
-	)
-	require.NoError(t, err, "Should be able to enable socket audit device")
+	client := newIntegrationVaultClient(t)
+	enableSocketAudit(t, client, "integration-socket-test", "127.0.0.1:19999", "udp", "Integration socket test")
 
 	// Verify the audit device is enabled
 	audits, err := client.Sys().ListAudit()
@@ -153,95 +279,30 @@ func TestIntegration_AuditDeviceWithSocketConfig(t *testing.T) {
 		t.Logf("Write operation result: %v (expected in some configurations)", err)
 	}
 
-	// Clean up
-	_ = client.Sys().DisableAudit("integration-socket-test")
 	_ = client.Sys().Unmount("integration-kv")
 }
 
 func TestIntegration_AuditServerWithRules(t *testing.T) {
-	vaultAddr := getEnvOrDefault("VAULT_ADDR", defaultVaultAddr)
-	vaultToken := getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)
-
-	// Create a temp file for audit logs
 	tmpDir := t.TempDir()
 	logFile := tmpDir + "/audit.log"
 
-	// Configure viper with rule groups
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	server := newIntegrationAuditServer(t, "udp", []auditserver.RuleGroupConfig{
 		{
-			"name": "all_operations",
-			"rules": []string{
+			Name: "all_operations",
+			Rules: []string{
 				"Auth.PolicyResults.Allowed == true",
 			},
-			"log_file": map[string]interface{}{
-				"file_path":   logFile,
-				"max_size":    10,
-				"max_backups": 1,
-				"max_age":     1,
-				"compress":    false,
-			},
+			LogFile: integrationLogFile(logFile),
 		},
 	})
-
-	// Create the audit server
-	var logBuf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	server, err := auditserver.New(logger)
-	require.NoError(t, err)
-	require.NotNil(t, server)
-
-	// Start a UDP listener
-	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-
-	conn, err := net.ListenUDP("udp", addr)
-	require.NoError(t, err)
-	defer conn.Close()
-
-	localAddr := conn.LocalAddr().String()
+	localAddr := startUDPAuditListener(t, server)
 	t.Logf("Audit server listening on %s", localAddr)
 
-	// Process incoming messages in a goroutine
-	done := make(chan struct{})
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-				n, _, err := conn.ReadFromUDP(buf)
-				if err != nil {
-					continue
-				}
-				// Process through the audit server
-				server.React(buf[:n], nil)
-			}
-		}
-	}()
-
-	// Connect to Vault and enable audit device
-	client, err := vault.NewVaultClient(vaultAddr, vault.TokenAuth{Token: vaultToken})
-	require.NoError(t, err)
-
-	_ = client.Sys().DisableAudit("integration-rules-test")
-
-	err = client.EnableAuditDevice(
-		"integration-rules-test",
-		"socket",
-		"Integration rules test",
-		map[string]string{
-			"address":     localAddr,
-			"socket_type": "udp",
-			"log_raw":     "false",
-		},
-	)
-	require.NoError(t, err)
+	client := newIntegrationVaultClient(t)
+	enableSocketAudit(t, client, "integration-rules-test", localAddr, "udp", "Integration rules test")
 
 	// Perform Vault operations
-	err = client.Sys().Mount("integration-kv-rules", &vaultapi.MountInput{
+	err := client.Sys().Mount("integration-kv-rules", &vaultapi.MountInput{
 		Type:        "kv",
 		Description: "Integration test KV for rules",
 		Options:     map[string]string{"version": "2"},
@@ -255,121 +316,31 @@ func TestIntegration_AuditServerWithRules(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Wait for processing
-	time.Sleep(500 * time.Millisecond)
-	close(done)
+	logContent := waitForLogFile(t, logFile)
+	t.Logf("Audit log file contains %d bytes", len(logContent))
 
-	// Check that logs were written
-	logContent, err := os.ReadFile(logFile)
-	if err == nil && len(logContent) > 0 {
-		t.Logf("Audit log file contains %d bytes", len(logContent))
-		assert.True(t, len(logContent) > 0, "Should have written audit logs")
-	}
-
-	// Clean up
-	_ = client.Sys().DisableAudit("integration-rules-test")
 	_ = client.Sys().Unmount("integration-kv-rules")
 }
 
 func TestIntegration_AuditServerWithRules_TCP(t *testing.T) {
-	vaultAddr := getEnvOrDefault("VAULT_ADDR", defaultVaultAddr)
-	vaultToken := getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)
-
 	tmpDir := t.TempDir()
 	logFile := tmpDir + "/audit-tcp.log"
 
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	server := newIntegrationAuditServer(t, "tcp", []auditserver.RuleGroupConfig{
 		{
-			"name": "all_tcp",
-			"rules": []string{
+			Name: "all_tcp",
+			Rules: []string{
 				"true",
 			},
-			"log_file": map[string]interface{}{
-				"file_path":   logFile,
-				"max_size":    10,
-				"max_backups": 1,
-				"max_age":     1,
-				"compress":    false,
-			},
+			LogFile: integrationLogFile(logFile),
 		},
 	})
+	auditAddress := startTCPAuditListener(t, server)
 
-	var logBuf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	server, err := auditserver.New(logger)
-	require.NoError(t, err)
-	require.NotNil(t, server)
+	client := newIntegrationVaultClient(t)
+	enableSocketAudit(t, client, "integration-rules-tcp-test", auditAddress, "tcp", "Integration TCP rules test")
 
-	tcpListenAddr := net.JoinHostPort(tcpListenerHost(), "0")
-	addr, err := net.ResolveTCPAddr("tcp", tcpListenAddr)
-	require.NoError(t, err)
-
-	auditListener, err := net.ListenTCP("tcp", addr)
-	require.NoError(t, err)
-	defer auditListener.Close()
-
-	auditDone := make(chan struct{})
-	go func() {
-		defer close(auditDone)
-
-		conn, acceptErr := auditListener.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close()
-
-		buf := make([]byte, 65535)
-		carry := make([]byte, 0)
-		for {
-			n, readErr := conn.Read(buf)
-			if n > 0 {
-				carry = append(carry, buf[:n]...)
-
-				for {
-					idx := bytes.IndexByte(carry, '\n')
-					if idx < 0 {
-						break
-					}
-
-					frame := carry[:idx]
-					frame = bytes.TrimSuffix(frame, []byte{'\r'})
-					if len(frame) > 0 {
-						server.React(frame, nil)
-					}
-
-					if idx+1 >= len(carry) {
-						carry = carry[:0]
-					} else {
-						carry = carry[idx+1:]
-					}
-				}
-			}
-
-			if readErr != nil {
-				return
-			}
-		}
-	}()
-
-	client, err := vault.NewVaultClient(vaultAddr, vault.TokenAuth{Token: vaultToken})
-	require.NoError(t, err)
-
-	_ = client.Sys().DisableAudit("integration-rules-tcp-test")
-
-	err = client.EnableAuditDevice(
-		"integration-rules-tcp-test",
-		"socket",
-		"Integration TCP rules test",
-		map[string]string{
-			"address":     tcpAuditAddressFromListener(auditListener.Addr()),
-			"socket_type": "tcp",
-			"log_raw":     "false",
-		},
-	)
-	require.NoError(t, err)
-
-	err = client.Sys().Mount("integration-kv-rules-tcp", &vaultapi.MountInput{
+	err := client.Sys().Mount("integration-kv-rules-tcp", &vaultapi.MountInput{
 		Type:        "kv",
 		Description: "Integration test KV for tcp rules",
 		Options:     map[string]string{"version": "2"},
@@ -383,22 +354,13 @@ func TestIntegration_AuditServerWithRules_TCP(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	time.Sleep(1 * time.Second)
-
-	_ = client.Sys().DisableAudit("integration-rules-tcp-test")
 	_ = client.Sys().Unmount("integration-kv-rules-tcp")
-	_ = auditListener.Close()
-	<-auditDone
 
-	content, err := os.ReadFile(logFile)
-	require.NoError(t, err)
+	content := waitForLogFile(t, logFile)
 	assert.Greater(t, len(content), 0, "should have written audit logs over TCP")
 }
 
 func TestIntegration_AuditServerForwarding(t *testing.T) {
-	vaultAddr := getEnvOrDefault("VAULT_ADDR", defaultVaultAddr)
-	vaultToken := getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)
-
 	// Start a UDP receiver for forwarded messages
 	forwardAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -438,81 +400,21 @@ func TestIntegration_AuditServerForwarding(t *testing.T) {
 	tmpDir := t.TempDir()
 	logFile := tmpDir + "/audit.log"
 
-	// Configure viper with forwarding enabled
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	server := newIntegrationAuditServer(t, "udp", []auditserver.RuleGroupConfig{
 		{
-			"name": "forward_all",
-			"rules": []string{
+			Name: "forward_all",
+			Rules: []string{
 				"true", // Match everything
 			},
-			"log_file": map[string]interface{}{
-				"file_path":   logFile,
-				"max_size":    10,
-				"max_backups": 1,
-				"max_age":     1,
-				"compress":    false,
-			},
-			"forwarding": map[string]interface{}{
-				"enabled": true,
-				"address": forwardLocalAddr,
-			},
+			LogFile:    integrationLogFile(logFile),
+			Forwarding: auditserver.ForwardingConfig{Enabled: true, Address: forwardLocalAddr},
 		},
 	})
-
-	// Create the audit server
-	var logBuf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	server, err := auditserver.New(logger)
-	require.NoError(t, err)
-
-	// Start audit server listener
-	auditAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-
-	auditConn, err := net.ListenUDP("udp", auditAddr)
-	require.NoError(t, err)
-	defer auditConn.Close()
-
-	auditLocalAddr := auditConn.LocalAddr().String()
+	auditLocalAddr := startUDPAuditListener(t, server)
 	t.Logf("Audit server listening on %s", auditLocalAddr)
 
-	// Process incoming messages
-	auditDone := make(chan struct{})
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			select {
-			case <-auditDone:
-				return
-			default:
-				auditConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-				n, _, err := auditConn.ReadFromUDP(buf)
-				if err != nil {
-					continue
-				}
-				server.React(buf[:n], nil)
-			}
-		}
-	}()
-
-	// Connect to Vault
-	client, err := vault.NewVaultClient(vaultAddr, vault.TokenAuth{Token: vaultToken})
-	require.NoError(t, err)
-
-	_ = client.Sys().DisableAudit("integration-forward-test")
-
-	err = client.EnableAuditDevice(
-		"integration-forward-test",
-		"socket",
-		"Integration forward test",
-		map[string]string{
-			"address":     auditLocalAddr,
-			"socket_type": "udp",
-			"log_raw":     "false",
-		},
-	)
-	require.NoError(t, err)
+	client := newIntegrationVaultClient(t)
+	enableSocketAudit(t, client, "integration-forward-test", auditLocalAddr, "udp", "Integration forward test")
 
 	// Perform Vault operations
 	err = client.Sys().Mount("integration-kv-forward", &vaultapi.MountInput{
@@ -529,9 +431,11 @@ func TestIntegration_AuditServerForwarding(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Wait for processing
-	time.Sleep(500 * time.Millisecond)
-	close(auditDone)
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(forwarded) > 0
+	}, 2*time.Second, 50*time.Millisecond)
 	close(forwardDone)
 
 	// Verify forwarding worked
@@ -540,102 +444,38 @@ func TestIntegration_AuditServerForwarding(t *testing.T) {
 
 	t.Logf("Received %d forwarded messages", len(forwarded))
 
-	// Clean up
-	_ = client.Sys().DisableAudit("integration-forward-test")
 	_ = client.Sys().Unmount("integration-kv-forward")
 }
 
 // TestIntegration_OperationFiltering tests rules that filter by operation type
 func TestIntegration_OperationFiltering(t *testing.T) {
-	vaultAddr := getEnvOrDefault("VAULT_ADDR", defaultVaultAddr)
-	vaultToken := getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)
-
 	tmpDir := t.TempDir()
 	deleteLogFile := tmpDir + "/delete_ops.log"
 	readLogFile := tmpDir + "/read_ops.log"
 
-	// Configure two rule groups: one for deletes, one for reads
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	server := newIntegrationAuditServer(t, "udp", []auditserver.RuleGroupConfig{
 		{
-			"name": "delete_operations",
-			"rules": []string{
+			Name: "delete_operations",
+			Rules: []string{
 				`Request.Operation == "delete"`,
 			},
-			"log_file": map[string]interface{}{
-				"file_path":   deleteLogFile,
-				"max_size":    10,
-				"max_backups": 1,
-				"max_age":     1,
-				"compress":    false,
-			},
+			LogFile: integrationLogFile(deleteLogFile),
 		},
 		{
-			"name": "read_operations",
-			"rules": []string{
+			Name: "read_operations",
+			Rules: []string{
 				`Request.Operation == "read"`,
 			},
-			"log_file": map[string]interface{}{
-				"file_path":   readLogFile,
-				"max_size":    10,
-				"max_backups": 1,
-				"max_age":     1,
-				"compress":    false,
-			},
+			LogFile: integrationLogFile(readLogFile),
 		},
 	})
+	localAddr := startUDPAuditListener(t, server)
 
-	var logBuf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	server, err := auditserver.New(logger)
-	require.NoError(t, err)
-
-	// Start UDP listener
-	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-	conn, err := net.ListenUDP("udp", addr)
-	require.NoError(t, err)
-	defer conn.Close()
-
-	localAddr := conn.LocalAddr().String()
-
-	done := make(chan struct{})
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-				n, _, err := conn.ReadFromUDP(buf)
-				if err != nil {
-					continue
-				}
-				server.React(buf[:n], nil)
-			}
-		}
-	}()
-
-	client, err := vault.NewVaultClient(vaultAddr, vault.TokenAuth{Token: vaultToken})
-	require.NoError(t, err)
-
-	_ = client.Sys().DisableAudit("integration-op-filter-test")
-
-	err = client.EnableAuditDevice(
-		"integration-op-filter-test",
-		"socket",
-		"Integration operation filter test",
-		map[string]string{
-			"address":     localAddr,
-			"socket_type": "udp",
-			"log_raw":     "false",
-		},
-	)
-	require.NoError(t, err)
+	client := newIntegrationVaultClient(t)
+	enableSocketAudit(t, client, "integration-op-filter-test", localAddr, "udp", "Integration operation filter test")
 
 	// Setup KV engine
-	err = client.Sys().Mount("integration-kv-opfilter", &vaultapi.MountInput{
+	err := client.Sys().Mount("integration-kv-opfilter", &vaultapi.MountInput{
 		Type:        "kv",
 		Description: "Integration test KV for op filtering",
 		Options:     map[string]string{"version": "2"},
@@ -658,117 +498,45 @@ func TestIntegration_OperationFiltering(t *testing.T) {
 	_, err = client.Logical().Delete("integration-kv-opfilter/data/test")
 	require.NoError(t, err)
 
-	time.Sleep(500 * time.Millisecond)
-	close(done)
+	deleteContent := waitForLogFile(t, deleteLogFile)
+	t.Logf("Delete operations log contains %d bytes", len(deleteContent))
+	assert.Contains(t, deleteContent, "delete", "Should contain delete operations")
 
-	// Check delete log file
-	deleteContent, err := os.ReadFile(deleteLogFile)
-	if err == nil && len(deleteContent) > 0 {
-		t.Logf("Delete operations log contains %d bytes", len(deleteContent))
-		assert.Contains(t, string(deleteContent), "delete", "Should contain delete operations")
-	}
+	readContent := waitForLogFile(t, readLogFile)
+	t.Logf("Read operations log contains %d bytes", len(readContent))
+	assert.Contains(t, readContent, "read", "Should contain read operations")
 
-	// Check read log file
-	readContent, err := os.ReadFile(readLogFile)
-	if err == nil && len(readContent) > 0 {
-		t.Logf("Read operations log contains %d bytes", len(readContent))
-		assert.Contains(t, string(readContent), "read", "Should contain read operations")
-	}
-
-	// Clean up
-	_ = client.Sys().DisableAudit("integration-op-filter-test")
 	_ = client.Sys().Unmount("integration-kv-opfilter")
 }
 
 // TestIntegration_PathBasedRules tests rules that filter by request path
 func TestIntegration_PathBasedRules(t *testing.T) {
-	vaultAddr := getEnvOrDefault("VAULT_ADDR", defaultVaultAddr)
-	vaultToken := getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)
-
 	tmpDir := t.TempDir()
 	secretsLogFile := tmpDir + "/secrets.log"
 	metadataLogFile := tmpDir + "/metadata.log"
 
-	// Configure rules for different paths
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	server := newIntegrationAuditServer(t, "udp", []auditserver.RuleGroupConfig{
 		{
-			"name": "secrets_path",
-			"rules": []string{
+			Name: "secrets_path",
+			Rules: []string{
 				`Request.Path startsWith "integration-kv-path/data/"`,
 			},
-			"log_file": map[string]interface{}{
-				"file_path":   secretsLogFile,
-				"max_size":    10,
-				"max_backups": 1,
-				"max_age":     1,
-				"compress":    false,
-			},
+			LogFile: integrationLogFile(secretsLogFile),
 		},
 		{
-			"name": "metadata_path",
-			"rules": []string{
+			Name: "metadata_path",
+			Rules: []string{
 				`Request.Path startsWith "integration-kv-path/metadata/"`,
 			},
-			"log_file": map[string]interface{}{
-				"file_path":   metadataLogFile,
-				"max_size":    10,
-				"max_backups": 1,
-				"max_age":     1,
-				"compress":    false,
-			},
+			LogFile: integrationLogFile(metadataLogFile),
 		},
 	})
+	localAddr := startUDPAuditListener(t, server)
 
-	var logBuf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	server, err := auditserver.New(logger)
-	require.NoError(t, err)
+	client := newIntegrationVaultClient(t)
+	enableSocketAudit(t, client, "integration-path-test", localAddr, "udp", "Integration path test")
 
-	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-	conn, err := net.ListenUDP("udp", addr)
-	require.NoError(t, err)
-	defer conn.Close()
-
-	localAddr := conn.LocalAddr().String()
-
-	done := make(chan struct{})
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-				n, _, err := conn.ReadFromUDP(buf)
-				if err != nil {
-					continue
-				}
-				server.React(buf[:n], nil)
-			}
-		}
-	}()
-
-	client, err := vault.NewVaultClient(vaultAddr, vault.TokenAuth{Token: vaultToken})
-	require.NoError(t, err)
-
-	_ = client.Sys().DisableAudit("integration-path-test")
-
-	err = client.EnableAuditDevice(
-		"integration-path-test",
-		"socket",
-		"Integration path test",
-		map[string]string{
-			"address":     localAddr,
-			"socket_type": "udp",
-			"log_raw":     "false",
-		},
-	)
-	require.NoError(t, err)
-
-	err = client.Sys().Mount("integration-kv-path", &vaultapi.MountInput{
+	err := client.Sys().Mount("integration-kv-path", &vaultapi.MountInput{
 		Type:        "kv",
 		Description: "Integration test KV for path filtering",
 		Options:     map[string]string{"version": "2"},
@@ -787,103 +555,37 @@ func TestIntegration_PathBasedRules(t *testing.T) {
 	_, err = client.Logical().Read("integration-kv-path/metadata/mysecret")
 	require.NoError(t, err)
 
-	time.Sleep(500 * time.Millisecond)
-	close(done)
+	secretsContent := waitForLogFile(t, secretsLogFile)
+	t.Logf("Secrets path log contains %d bytes", len(secretsContent))
+	assert.Contains(t, secretsContent, "integration-kv-path/data/", "Should contain data path operations")
 
-	// Check secrets log
-	secretsContent, err := os.ReadFile(secretsLogFile)
-	if err == nil && len(secretsContent) > 0 {
-		t.Logf("Secrets path log contains %d bytes", len(secretsContent))
-		assert.Contains(t, string(secretsContent), "integration-kv-path/data/", "Should contain data path operations")
-	}
+	metadataContent := waitForLogFile(t, metadataLogFile)
+	t.Logf("Metadata path log contains %d bytes", len(metadataContent))
+	assert.Contains(t, metadataContent, "integration-kv-path/metadata/", "Should contain metadata path operations")
 
-	// Check metadata log
-	metadataContent, err := os.ReadFile(metadataLogFile)
-	if err == nil && len(metadataContent) > 0 {
-		t.Logf("Metadata path log contains %d bytes", len(metadataContent))
-		assert.Contains(t, string(metadataContent), "integration-kv-path/metadata/", "Should contain metadata path operations")
-	}
-
-	// Clean up
-	_ = client.Sys().DisableAudit("integration-path-test")
 	_ = client.Sys().Unmount("integration-kv-path")
 }
 
 // TestIntegration_CombinedConditions tests rules with AND conditions
 func TestIntegration_CombinedConditions(t *testing.T) {
-	vaultAddr := getEnvOrDefault("VAULT_ADDR", defaultVaultAddr)
-	vaultToken := getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)
-
 	tmpDir := t.TempDir()
 	combinedLogFile := tmpDir + "/combined.log"
 
-	// Rule: only match allowed updates to specific path
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	server := newIntegrationAuditServer(t, "udp", []auditserver.RuleGroupConfig{
 		{
-			"name": "combined_rule",
-			"rules": []string{
+			Name: "combined_rule",
+			Rules: []string{
 				`Request.Operation == "update" && Auth.PolicyResults.Allowed == true`,
 			},
-			"log_file": map[string]interface{}{
-				"file_path":   combinedLogFile,
-				"max_size":    10,
-				"max_backups": 1,
-				"max_age":     1,
-				"compress":    false,
-			},
+			LogFile: integrationLogFile(combinedLogFile),
 		},
 	})
+	localAddr := startUDPAuditListener(t, server)
 
-	var logBuf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	server, err := auditserver.New(logger)
-	require.NoError(t, err)
+	client := newIntegrationVaultClient(t)
+	enableSocketAudit(t, client, "integration-combined-test", localAddr, "udp", "Integration combined test")
 
-	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-	conn, err := net.ListenUDP("udp", addr)
-	require.NoError(t, err)
-	defer conn.Close()
-
-	localAddr := conn.LocalAddr().String()
-
-	done := make(chan struct{})
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-				n, _, err := conn.ReadFromUDP(buf)
-				if err != nil {
-					continue
-				}
-				server.React(buf[:n], nil)
-			}
-		}
-	}()
-
-	client, err := vault.NewVaultClient(vaultAddr, vault.TokenAuth{Token: vaultToken})
-	require.NoError(t, err)
-
-	_ = client.Sys().DisableAudit("integration-combined-test")
-
-	err = client.EnableAuditDevice(
-		"integration-combined-test",
-		"socket",
-		"Integration combined test",
-		map[string]string{
-			"address":     localAddr,
-			"socket_type": "udp",
-			"log_raw":     "false",
-		},
-	)
-	require.NoError(t, err)
-
-	err = client.Sys().Mount("integration-kv-combined", &vaultapi.MountInput{
+	err := client.Sys().Mount("integration-kv-combined", &vaultapi.MountInput{
 		Type:        "kv",
 		Description: "Integration test KV for combined rules",
 		Options:     map[string]string{"version": "2"},
@@ -902,126 +604,50 @@ func TestIntegration_CombinedConditions(t *testing.T) {
 	_, err = client.Logical().Read("integration-kv-combined/data/test")
 	require.NoError(t, err)
 
-	time.Sleep(500 * time.Millisecond)
-	close(done)
+	combinedContent := waitForLogFile(t, combinedLogFile)
+	t.Logf("Combined conditions log contains %d bytes", len(combinedContent))
+	assert.Contains(t, combinedContent, "update", "Should contain update operations")
+	assert.NotContains(t, combinedContent, `"operation":"read"`, "Should not contain read operations")
 
-	// Verify combined log only has updates
-	combinedContent, err := os.ReadFile(combinedLogFile)
-	if err == nil && len(combinedContent) > 0 {
-		t.Logf("Combined conditions log contains %d bytes", len(combinedContent))
-		assert.Contains(t, string(combinedContent), "update", "Should contain update operations")
-		// Should not contain read operations
-		assert.NotContains(t, string(combinedContent), `"operation":"read"`, "Should not contain read operations")
-	}
-
-	// Clean up
-	_ = client.Sys().DisableAudit("integration-combined-test")
 	_ = client.Sys().Unmount("integration-kv-combined")
 }
 
 // TestIntegration_MultipleRuleGroups tests that logs route to correct groups
 func TestIntegration_MultipleRuleGroups(t *testing.T) {
-	vaultAddr := getEnvOrDefault("VAULT_ADDR", defaultVaultAddr)
-	vaultToken := getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)
-
 	tmpDir := t.TempDir()
 	group1Log := tmpDir + "/group1.log"
 	group2Log := tmpDir + "/group2.log"
 	group3Log := tmpDir + "/group3.log"
 
-	// Three different rule groups
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	server := newIntegrationAuditServer(t, "udp", []auditserver.RuleGroupConfig{
 		{
-			"name": "group1_updates",
-			"rules": []string{
+			Name: "group1_updates",
+			Rules: []string{
 				`Request.Operation == "update"`,
 			},
-			"log_file": map[string]interface{}{
-				"file_path":   group1Log,
-				"max_size":    10,
-				"max_backups": 1,
-				"max_age":     1,
-				"compress":    false,
-			},
+			LogFile: integrationLogFile(group1Log),
 		},
 		{
-			"name": "group2_reads",
-			"rules": []string{
+			Name: "group2_reads",
+			Rules: []string{
 				`Request.Operation == "read"`,
 			},
-			"log_file": map[string]interface{}{
-				"file_path":   group2Log,
-				"max_size":    10,
-				"max_backups": 1,
-				"max_age":     1,
-				"compress":    false,
-			},
+			LogFile: integrationLogFile(group2Log),
 		},
 		{
-			"name": "group3_deletes",
-			"rules": []string{
+			Name: "group3_deletes",
+			Rules: []string{
 				`Request.Operation == "delete"`,
 			},
-			"log_file": map[string]interface{}{
-				"file_path":   group3Log,
-				"max_size":    10,
-				"max_backups": 1,
-				"max_age":     1,
-				"compress":    false,
-			},
+			LogFile: integrationLogFile(group3Log),
 		},
 	})
+	localAddr := startUDPAuditListener(t, server)
 
-	var logBuf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	server, err := auditserver.New(logger)
-	require.NoError(t, err)
+	client := newIntegrationVaultClient(t)
+	enableSocketAudit(t, client, "integration-multigroup-test", localAddr, "udp", "Integration multi-group test")
 
-	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-	conn, err := net.ListenUDP("udp", addr)
-	require.NoError(t, err)
-	defer conn.Close()
-
-	localAddr := conn.LocalAddr().String()
-
-	done := make(chan struct{})
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-				n, _, err := conn.ReadFromUDP(buf)
-				if err != nil {
-					continue
-				}
-				server.React(buf[:n], nil)
-			}
-		}
-	}()
-
-	client, err := vault.NewVaultClient(vaultAddr, vault.TokenAuth{Token: vaultToken})
-	require.NoError(t, err)
-
-	_ = client.Sys().DisableAudit("integration-multigroup-test")
-
-	err = client.EnableAuditDevice(
-		"integration-multigroup-test",
-		"socket",
-		"Integration multi-group test",
-		map[string]string{
-			"address":     localAddr,
-			"socket_type": "udp",
-			"log_raw":     "false",
-		},
-	)
-	require.NoError(t, err)
-
-	err = client.Sys().Mount("integration-kv-multigroup", &vaultapi.MountInput{
+	err := client.Sys().Mount("integration-kv-multigroup", &vaultapi.MountInput{
 		Type:        "kv",
 		Description: "Integration test KV for multi-group",
 		Options:     map[string]string{"version": "2"},
@@ -1042,109 +668,41 @@ func TestIntegration_MultipleRuleGroups(t *testing.T) {
 	_, err = client.Logical().Delete("integration-kv-multigroup/data/test")
 	require.NoError(t, err)
 
-	time.Sleep(500 * time.Millisecond)
-	close(done)
-
-	// Verify each group has the right operations
-	group1Content, _ := os.ReadFile(group1Log)
-	group2Content, _ := os.ReadFile(group2Log)
-	group3Content, _ := os.ReadFile(group3Log)
+	group1Content := waitForLogFile(t, group1Log)
+	group2Content := waitForLogFile(t, group2Log)
+	group3Content := waitForLogFile(t, group3Log)
 
 	t.Logf("Group1 (updates): %d bytes", len(group1Content))
 	t.Logf("Group2 (reads): %d bytes", len(group2Content))
 	t.Logf("Group3 (deletes): %d bytes", len(group3Content))
 
-	// Each log should have content (operations were performed)
-	if len(group1Content) > 0 {
-		assert.Contains(t, string(group1Content), "update")
-	}
-	if len(group2Content) > 0 {
-		assert.Contains(t, string(group2Content), "read")
-	}
-	if len(group3Content) > 0 {
-		assert.Contains(t, string(group3Content), "delete")
-	}
+	assert.Contains(t, group1Content, "update")
+	assert.Contains(t, group2Content, "read")
+	assert.Contains(t, group3Content, "delete")
 
-	// Clean up
-	_ = client.Sys().DisableAudit("integration-multigroup-test")
 	_ = client.Sys().Unmount("integration-kv-multigroup")
 }
 
 // TestIntegration_NonMatchingRules verifies unmatched logs aren't captured
 func TestIntegration_NonMatchingRules(t *testing.T) {
-	vaultAddr := getEnvOrDefault("VAULT_ADDR", defaultVaultAddr)
-	vaultToken := getEnvOrDefault("VAULT_TOKEN", defaultVaultToken)
-
 	tmpDir := t.TempDir()
 	logFile := tmpDir + "/nonmatch.log"
 
-	// Rule that should never match normal operations
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	server := newIntegrationAuditServer(t, "udp", []auditserver.RuleGroupConfig{
 		{
-			"name": "impossible_rule",
-			"rules": []string{
+			Name: "impossible_rule",
+			Rules: []string{
 				`Request.Path == "this/path/does/not/exist/ever"`,
 			},
-			"log_file": map[string]interface{}{
-				"file_path":   logFile,
-				"max_size":    10,
-				"max_backups": 1,
-				"max_age":     1,
-				"compress":    false,
-			},
+			LogFile: integrationLogFile(logFile),
 		},
 	})
+	localAddr := startUDPAuditListener(t, server)
 
-	var logBuf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	server, err := auditserver.New(logger)
-	require.NoError(t, err)
+	client := newIntegrationVaultClient(t)
+	enableSocketAudit(t, client, "integration-nonmatch-test", localAddr, "udp", "Integration non-match test")
 
-	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-	conn, err := net.ListenUDP("udp", addr)
-	require.NoError(t, err)
-	defer conn.Close()
-
-	localAddr := conn.LocalAddr().String()
-
-	done := make(chan struct{})
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-				n, _, err := conn.ReadFromUDP(buf)
-				if err != nil {
-					continue
-				}
-				server.React(buf[:n], nil)
-			}
-		}
-	}()
-
-	client, err := vault.NewVaultClient(vaultAddr, vault.TokenAuth{Token: vaultToken})
-	require.NoError(t, err)
-
-	_ = client.Sys().DisableAudit("integration-nonmatch-test")
-
-	err = client.EnableAuditDevice(
-		"integration-nonmatch-test",
-		"socket",
-		"Integration non-match test",
-		map[string]string{
-			"address":     localAddr,
-			"socket_type": "udp",
-			"log_raw":     "false",
-		},
-	)
-	require.NoError(t, err)
-
-	err = client.Sys().Mount("integration-kv-nonmatch", &vaultapi.MountInput{
+	err := client.Sys().Mount("integration-kv-nonmatch", &vaultapi.MountInput{
 		Type:        "kv",
 		Description: "Integration test KV for non-match",
 		Options:     map[string]string{"version": "2"},
@@ -1162,18 +720,10 @@ func TestIntegration_NonMatchingRules(t *testing.T) {
 	_, err = client.Logical().Read("integration-kv-nonmatch/data/test")
 	require.NoError(t, err)
 
-	time.Sleep(500 * time.Millisecond)
-	close(done)
+	require.Never(t, func() bool {
+		return readLogFile(logFile) != ""
+	}, 500*time.Millisecond, 50*time.Millisecond, "Log file should stay empty for non-matching rules")
 
-	// Log file should be empty or not exist
-	logContent, err := os.ReadFile(logFile)
-	if err == nil {
-		assert.Empty(t, logContent, "Log file should be empty for non-matching rules")
-	}
-	// If file doesn't exist, that's also acceptable
-
-	// Clean up
-	_ = client.Sys().DisableAudit("integration-nonmatch-test")
 	_ = client.Sys().Unmount("integration-kv-nonmatch")
 }
 
@@ -1186,85 +736,29 @@ func TestIntegration_AuthFailures(t *testing.T) {
 	deniedLogFile := tmpDir + "/denied.log"
 	allowedLogFile := tmpDir + "/allowed.log"
 
-	// Two rules: one for allowed, one for denied
-	viper.Reset()
-	viper.Set("rule_groups", []map[string]interface{}{
+	server := newIntegrationAuditServer(t, "udp", []auditserver.RuleGroupConfig{
 		{
-			"name": "denied_operations",
-			"rules": []string{
+			Name: "denied_operations",
+			Rules: []string{
 				`Auth.PolicyResults.Allowed == false`,
 			},
-			"log_file": map[string]interface{}{
-				"file_path":   deniedLogFile,
-				"max_size":    10,
-				"max_backups": 1,
-				"max_age":     1,
-				"compress":    false,
-			},
+			LogFile: integrationLogFile(deniedLogFile),
 		},
 		{
-			"name": "allowed_operations",
-			"rules": []string{
+			Name: "allowed_operations",
+			Rules: []string{
 				`Auth.PolicyResults.Allowed == true`,
 			},
-			"log_file": map[string]interface{}{
-				"file_path":   allowedLogFile,
-				"max_size":    10,
-				"max_backups": 1,
-				"max_age":     1,
-				"compress":    false,
-			},
+			LogFile: integrationLogFile(allowedLogFile),
 		},
 	})
-
-	var logBuf bytes.Buffer
-	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	server, err := auditserver.New(logger)
-	require.NoError(t, err)
-
-	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-	conn, err := net.ListenUDP("udp", addr)
-	require.NoError(t, err)
-	defer conn.Close()
-
-	localAddr := conn.LocalAddr().String()
-
-	done := make(chan struct{})
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-				n, _, err := conn.ReadFromUDP(buf)
-				if err != nil {
-					continue
-				}
-				server.React(buf[:n], nil)
-			}
-		}
-	}()
+	localAddr := startUDPAuditListener(t, server)
 
 	// Connect as root to setup audit device
 	rootClient, err := vault.NewVaultClient(vaultAddr, vault.TokenAuth{Token: vaultToken})
 	require.NoError(t, err)
 
-	_ = rootClient.Sys().DisableAudit("integration-auth-test")
-
-	err = rootClient.EnableAuditDevice(
-		"integration-auth-test",
-		"socket",
-		"Integration auth test",
-		map[string]string{
-			"address":     localAddr,
-			"socket_type": "udp",
-			"log_raw":     "false",
-		},
-	)
-	require.NoError(t, err)
+	enableSocketAudit(t, rootClient, "integration-auth-test", localAddr, "udp", "Integration auth test")
 
 	// Create a limited policy
 	err = rootClient.Sys().PutPolicy("integration-limited", `
@@ -1307,15 +801,12 @@ func TestIntegration_AuthFailures(t *testing.T) {
 	})
 	assert.Error(t, err, "Should fail due to policy denial")
 
-	time.Sleep(500 * time.Millisecond)
-	close(done)
-
 	// Check allowed log has content
-	allowedContent, _ := os.ReadFile(allowedLogFile)
+	allowedContent := readLogFile(allowedLogFile)
 	t.Logf("Allowed operations log: %d bytes", len(allowedContent))
 
 	// Check denied log - may have content if Vault generates audit for denials
-	deniedContent, _ := os.ReadFile(deniedLogFile)
+	deniedContent := readLogFile(deniedLogFile)
 	t.Logf("Denied operations log: %d bytes", len(deniedContent))
 
 	// Note: Due to UDP delivery timing in dev mode, we may not always receive logs
@@ -1328,7 +819,6 @@ func TestIntegration_AuthFailures(t *testing.T) {
 	}
 
 	// Clean up
-	_ = rootClient.Sys().DisableAudit("integration-auth-test")
 	_ = rootClient.Sys().DeletePolicy("integration-limited")
 	_ = rootClient.Sys().Unmount("integration-kv-auth")
 }

@@ -43,17 +43,13 @@ var setupCmd = &cobra.Command{
 			return fmt.Errorf("unable to setup vault client: %w", err)
 		}
 
-		err = client.EnableAuditDevice(
-			viper.GetString("vault.audit_path"),
-			"socket",
-			viper.GetString("vault.audit_description"),
-			map[string]string{
-				"address":     viper.GetString("vault.audit_address"),
-				"socket_type": protocol,
-				"description": viper.GetString("vault.audit_description"),
-				"log_raw":     "false",
-			},
-		)
+		err = client.EnableSocketAuditDevice(vault.SocketAuditDeviceSpec{
+			Path:        viper.GetString("vault.audit_path"),
+			Address:     viper.GetString("vault.audit_address"),
+			Protocol:    protocol,
+			Description: viper.GetString("vault.audit_description"),
+			LogRaw:      false,
+		})
 		if err != nil {
 			return fmt.Errorf("unable to enable audit device: %w", err)
 		}

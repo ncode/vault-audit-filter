@@ -16,8 +16,11 @@ limitations under the License.
 package cmd
 
 import (
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/ncode/vault-audit-filter/pkg/auditserver"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,6 +57,76 @@ func TestAuditServerCmd_ValidConfig(t *testing.T) {
 	assert.NotNil(t, auditServerCmd)
 	assert.Equal(t, "auditServer", auditServerCmd.Use)
 	assert.NotNil(t, auditServerCmd.RunE)
+}
+
+func TestAuditServerRuntimeSettingsFromViper(t *testing.T) {
+	viper.Reset()
+	logPath := filepath.Join(t.TempDir(), "audit.log")
+	viper.Set("vault.audit_protocol", "tcp")
+	viper.Set("async.queue_size", 9)
+	viper.Set("async.workers", 3)
+	viper.Set("async.enqueue_mode", "wait")
+	viper.Set("async.enqueue_timeout", "13ms")
+	viper.Set("async.timeout", "19ms")
+	viper.Set("async.durable.enabled", true)
+	viper.Set("async.durable.dir", t.TempDir())
+	viper.Set("async.retry.max_attempts", 6)
+	viper.Set("async.retry.backoff", "29ms")
+	viper.Set("rule_groups", []map[string]interface{}{{
+		"name":     "configured",
+		"rules":    []string{"Request.Operation == 'read'"},
+		"log_file": map[string]interface{}{"file_path": logPath, "max_size": 1},
+	}})
+
+	settings, err := auditServerRuntimeSettings()
+	require.NoError(t, err)
+	assert.Equal(t, "tcp", settings.AuditProtocol)
+	assert.Equal(t, 9, settings.Async.QueueSize)
+	assert.Equal(t, 3, settings.Async.Workers)
+	assert.Equal(t, "wait", settings.Async.EnqueueMode)
+	assert.Equal(t, 13*time.Millisecond, settings.Async.EnqueueTimeout)
+	assert.Equal(t, 19*time.Millisecond, settings.Async.Timeout)
+	assert.True(t, settings.Async.Durable.Enabled)
+	assert.Equal(t, 6, settings.Async.Retry.MaxAttempts)
+	assert.Equal(t, 29*time.Millisecond, settings.Async.Retry.Backoff)
+	require.Len(t, settings.RuleGroups, 1)
+	assert.Equal(t, "configured", settings.RuleGroups[0].Name)
+	assert.Equal(t, logPath, settings.RuleGroups[0].LogFile.FilePath)
+}
+
+func TestAuditServerRuntimeSettings_InvalidAsyncValuesFallBackToDefaults(t *testing.T) {
+	viper.Reset()
+	viper.Set("vault.audit_protocol", "udp")
+	viper.Set("async.queue_size", 0)
+	viper.Set("async.workers", -1)
+	viper.Set("async.enqueue_mode", "invalid")
+	viper.Set("async.enqueue_timeout", "bad")
+	viper.Set("async.timeout", "also-bad")
+	viper.Set("async.durable.dir", "")
+	viper.Set("async.retry.max_attempts", 0)
+	viper.Set("async.retry.backoff", "worse")
+	viper.Set("rule_groups", []map[string]interface{}{})
+
+	settings, err := auditServerRuntimeSettings()
+	require.NoError(t, err)
+	defaults := auditserver.DefaultRuntimeSettings()
+	assert.Equal(t, defaults.Async.QueueSize, settings.Async.QueueSize)
+	assert.Equal(t, defaults.Async.Workers, settings.Async.Workers)
+	assert.Equal(t, defaults.Async.EnqueueMode, settings.Async.EnqueueMode)
+	assert.Equal(t, defaults.Async.EnqueueTimeout, settings.Async.EnqueueTimeout)
+	assert.Equal(t, defaults.Async.Timeout, settings.Async.Timeout)
+	assert.Equal(t, defaults.Async.Durable.Dir, settings.Async.Durable.Dir)
+	assert.Equal(t, defaults.Async.Retry.MaxAttempts, settings.Async.Retry.MaxAttempts)
+	assert.Equal(t, defaults.Async.Retry.Backoff, settings.Async.Retry.Backoff)
+}
+
+func TestAuditServerRuntimeSettings_InvalidProtocol(t *testing.T) {
+	viper.Reset()
+	viper.Set("vault.audit_protocol", "invalid")
+
+	_, err := auditServerRuntimeSettings()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported vault.audit_protocol")
 }
 
 func TestAuditServerCmd_RunE_InvokesGnetRun(t *testing.T) {

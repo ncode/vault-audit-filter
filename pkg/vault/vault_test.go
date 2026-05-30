@@ -300,6 +300,82 @@ func TestEnableAuditDevice_ListAuditError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to list audit devices")
 }
 
+func TestEnableSocketAuditDevice(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/sys/audit":
+			assert.Equal(t, http.MethodGet, r.Method)
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"data":{}}`))
+		case "/v1/sys/audit/socket-audit":
+			assert.Equal(t, http.MethodPut, r.Method)
+			var payload struct {
+				Type        string                 `json:"type"`
+				Description string                 `json:"description"`
+				Options     map[string]interface{} `json:"options"`
+			}
+			err := json.NewDecoder(r.Body).Decode(&payload)
+			assert.NoError(t, err)
+			assert.Equal(t, "socket", payload.Type)
+			assert.Equal(t, "Socket audit", payload.Description)
+			assert.Equal(t, map[string]interface{}{
+				"address":     "127.0.0.1:1269",
+				"socket_type": "tcp",
+				"description": "Socket audit",
+				"log_raw":     "true",
+			}, payload.Options)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("Unexpected request to %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, _ := vault.NewClient(&vault.Config{Address: server.URL})
+	vaultClient := &VaultClient{client}
+
+	err := vaultClient.EnableSocketAuditDevice(SocketAuditDeviceSpec{
+		Path:        "socket-audit",
+		Address:     "127.0.0.1:1269",
+		Protocol:    "tcp",
+		Description: "Socket audit",
+		LogRaw:      true,
+	})
+	assert.NoError(t, err)
+}
+
+func TestEnableSocketAuditDevice_DefaultProtocolAndRawPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/sys/audit":
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"data":{}}`))
+		case "/v1/sys/audit/socket-audit":
+			var payload struct {
+				Options map[string]interface{} `json:"options"`
+			}
+			err := json.NewDecoder(r.Body).Decode(&payload)
+			assert.NoError(t, err)
+			assert.Equal(t, "udp", payload.Options["socket_type"])
+			assert.Equal(t, "false", payload.Options["log_raw"])
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("Unexpected request to %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, _ := vault.NewClient(&vault.Config{Address: server.URL})
+	vaultClient := &VaultClient{client}
+
+	err := vaultClient.EnableSocketAuditDevice(SocketAuditDeviceSpec{
+		Path:        "socket-audit",
+		Address:     "127.0.0.1:1269",
+		Description: "Socket audit",
+	})
+	assert.NoError(t, err)
+}
+
 func TestVaultClient_Operations(t *testing.T) {
 	tests := []struct {
 		name        string

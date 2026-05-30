@@ -1,14 +1,12 @@
 package auditserver
 
 import (
-	"bytes"
 	"fmt"
 	json "github.com/bytedance/sonic"
 	"io"
 	"log"
 	"log/slog"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,7 +16,6 @@ import (
 	"github.com/ncode/vault-audit-filter/pkg/forwarder"
 	"github.com/ncode/vault-audit-filter/pkg/messaging"
 	"github.com/panjf2000/gnet/v2"
-	"github.com/spf13/viper"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -134,9 +131,11 @@ type AuditServer struct {
 	*gnet.BuiltinEventEngine
 	logger                *slog.Logger
 	ruleGroups            []RuleGroup
+	ruleExecutor          ruleGroupExecutor
 	auditTransport        string
 	sideQueue             chan sideTask
 	sideDrops             atomic.Uint64
+	sideProcessor         *sideEffectProcessor
 	asyncEnqueueMode      string
 	asyncEnqueueTimeout   time.Duration
 	asyncWorkers          int
@@ -197,11 +196,7 @@ func (as *AuditServer) matchFrame(frame []byte) (matchResult, error) {
 	}
 
 	var matchedIndexes []int
-	for idx := range as.ruleGroups {
-		if as.ruleGroups[idx].shouldLog(auditLog) {
-			matchedIndexes = append(matchedIndexes, idx)
-		}
-	}
+	matchedIndexes = as.executor().Match(auditLog)
 	result := matchResult{
 		Matched:             len(matchedIndexes) > 0,
 		Log:                 *auditLog,
@@ -213,47 +208,7 @@ func (as *AuditServer) matchFrame(frame []byte) (matchResult, error) {
 }
 
 func (as *AuditServer) handleFrameWithResult(frame []byte, result matchResult) {
-
-	var payload []byte
-	var payloadStr string
-	payloadReady := false
-	payloadStrReady := false
-
-	for _, rgIdx := range result.matchedGroupIndexes {
-		rg := as.ruleGroups[rgIdx]
-
-		as.logger.Debug("Matched rule group", "group", rg.Name)
-
-		if rg.Messenger != nil || rg.Forwarder != nil {
-			if !payloadReady {
-				payload = append([]byte(nil), frame...)
-				payloadReady = true
-			}
-			if rg.Messenger != nil && !payloadStrReady {
-				payloadStr = string(payload)
-				payloadStrReady = true
-			}
-			_ = as.enqueueSide(sideTask{
-				groupName:  rg.Name,
-				payload:    payload,
-				payloadStr: payloadStr,
-				messenger:  rg.Messenger,
-				forwarder:  rg.Forwarder,
-			})
-		}
-
-		if rg.Writer != nil {
-			if _, err := rg.Writer.Write(frame); err != nil {
-				as.logger.Error("Failed to write audit log", "group", rg.Name, "error", err)
-			}
-		} else {
-			if payloadStrReady {
-				rg.Logger.Print(payloadStr)
-			} else {
-				rg.Logger.Print(string(frame))
-			}
-		}
-	}
+	as.executor().Execute(frame, result.matchedGroupIndexes)
 }
 
 func (as *AuditServer) handleFrame(frame []byte) gnet.Action {
@@ -276,157 +231,55 @@ func (as *AuditServer) React(frame []byte, _ gnet.Conn) (out []byte, action gnet
 }
 
 func (as *AuditServer) OnTraffic(c gnet.Conn) (action gnet.Action) {
-	frame, err := c.Next(-1)
-	if err != nil {
-		as.logger.Error("Error reading frame", "error", err)
-		return gnet.Close
-	}
-	if as.auditTransport == "tcp" {
-		var carryover []byte
-		if ctx := c.Context(); ctx != nil {
-			if b, ok := ctx.([]byte); ok {
-				carryover = b
-			}
-		}
-
-		remaining := as.handleTCPStream(frame, carryover)
-		if len(remaining) == 0 {
-			c.SetContext(nil)
-			return gnet.None
-		}
-		c.SetContext(append([]byte(nil), remaining...))
-		return gnet.None
-	}
-	return as.handleFrame(frame)
+	return newTransportAdapter(as.auditTransport, as.logger, as).OnTraffic(c)
 }
 
 func (as *AuditServer) handleTCPStream(frame []byte, carryover []byte) []byte {
-	buffer := append([]byte(nil), carryover...)
-	if len(frame) > 0 {
-		buffer = append(buffer, frame...)
-	}
-
-	for {
-		sep := bytes.IndexByte(buffer, '\n')
-		if sep < 0 {
-			return buffer
-		}
-
-		rawLine := buffer[:sep]
-		line := bytes.TrimSuffix(rawLine, []byte{'\r'})
-		if len(line) > 0 {
-			_ = as.handleFrame(line)
-		}
-
-		if sep == len(buffer)-1 {
-			buffer = buffer[:0]
-		} else {
-			buffer = buffer[sep+1:]
-		}
-	}
+	return newTransportAdapter("tcp", as.logger, as).handleTCPStream(frame, carryover)
 }
 
-func (rg *RuleGroup) shouldLog(auditLog *AuditLog) bool {
-	if len(rg.CompiledRules) == 0 {
-		return true
+func (as *AuditServer) executor() ruleGroupExecutor {
+	if as.ruleExecutor.groups != nil {
+		return as.ruleExecutor
 	}
-	for _, compiledRule := range rg.CompiledRules {
-		output, err := expr.Run(compiledRule.Program, auditLog)
-		if err != nil {
-			continue
-		}
-		if match, ok := output.(bool); ok && match {
-			return true
-		}
-	}
-	return false
+	return newRuleGroupExecutor(as.ruleGroups, as.logger, as)
 }
 
-func auditTransportProtocol(logger *slog.Logger) string {
-	protocol := strings.ToLower(strings.TrimSpace(viper.GetString("vault.audit_protocol")))
-	if protocol == "" {
-		protocol = "udp"
+func (as *AuditServer) submitSideEffect(req sideEffectRequest) bool {
+	if as.sideProcessor == nil {
+		return false
 	}
-
-	switch protocol {
-	case "udp", "tcp":
-		return protocol
-	default:
-		if logger != nil {
-			logger.Warn("Invalid vault.audit_protocol; using udp", "value", protocol)
-		}
-		return "udp"
-	}
+	return as.sideProcessor.Submit(req)
 }
 
-func New(logger *slog.Logger) (*AuditServer, error) {
+func (as *AuditServer) resolveSideTaskAdapters(groupName string) sideTaskAdapters {
+	for i := range as.ruleGroups {
+		if as.ruleGroups[i].Name == groupName {
+			return sideTaskAdapters{
+				messenger: as.ruleGroups[i].Messenger,
+				forwarder: as.ruleGroups[i].Forwarder,
+			}
+		}
+	}
+	return sideTaskAdapters{}
+}
+
+func New(logger *slog.Logger, runtimeSettings ...RuntimeSettings) (*AuditServer, error) {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
-
-	viper.SetDefault("async.queue_size", 20)
-	viper.SetDefault("async.workers", defaultSideWorkers)
-	viper.SetDefault("async.enqueue_mode", "drop")
-	viper.SetDefault("async.enqueue_timeout", "5ms")
-	viper.SetDefault("async.timeout", "5s")
-	viper.SetDefault("async.durable.enabled", false)
-	viper.SetDefault("async.durable.dir", "./.vault-audit-filter-sideeffects")
-	viper.SetDefault("async.retry.max_attempts", 3)
-	viper.SetDefault("async.retry.backoff", "100ms")
-
-	queueSize := viper.GetInt("async.queue_size")
-	if queueSize <= 0 {
-		queueSize = 20
-	}
-	workers := viper.GetInt("async.workers")
-	if workers < 0 {
-		workers = defaultSideWorkers
-	}
-	enqueueMode := strings.ToLower(strings.TrimSpace(viper.GetString("async.enqueue_mode")))
-	if enqueueMode == "" {
-		enqueueMode = "drop"
-	}
-	if enqueueMode != "drop" && enqueueMode != "wait" {
-		logger.Warn("Invalid async.enqueue_mode; using default", "value", enqueueMode)
-		enqueueMode = "drop"
-	}
-	rawEnqueueTimeout := viper.GetString("async.enqueue_timeout")
-	enqueueTimeout, err := time.ParseDuration(rawEnqueueTimeout)
-	if err != nil || enqueueTimeout <= 0 {
-		enqueueTimeout = 5 * time.Millisecond
-		logger.Warn("Invalid async.enqueue_timeout; using default", "value", rawEnqueueTimeout)
-	}
-	rawTimeout := viper.GetString("async.timeout")
-	asyncTimeout, err := time.ParseDuration(rawTimeout)
-	if err != nil {
-		asyncTimeout = 5 * time.Second
-		logger.Warn("Invalid async.timeout; using default", "value", rawTimeout)
-	}
-	durableEnabled := viper.GetBool("async.durable.enabled")
-	durableDir := strings.TrimSpace(viper.GetString("async.durable.dir"))
-	if durableDir == "" {
-		durableDir = "./.vault-audit-filter-sideeffects"
-	}
-	retryMaxAttempts := viper.GetInt("async.retry.max_attempts")
-	if retryMaxAttempts <= 0 {
-		retryMaxAttempts = 3
-	}
-	rawRetryBackoff := viper.GetString("async.retry.backoff")
-	retryBackoff, err := time.ParseDuration(rawRetryBackoff)
-	if err != nil || retryBackoff <= 0 {
-		retryBackoff = 100 * time.Millisecond
-		logger.Warn("Invalid async.retry.backoff; using default", "value", rawRetryBackoff)
+	if len(runtimeSettings) > 1 {
+		return nil, fmt.Errorf("expected at most one runtime settings value")
 	}
 
-	// Load rule groups from configuration
-	var ruleGroupConfigs []RuleGroupConfig
-	if err := viper.UnmarshalKey("rule_groups", &ruleGroupConfigs); err != nil {
-		logger.Error("Failed to load rule groups", "error", err)
-		return nil, fmt.Errorf("failed to load rule groups: %w", err)
+	settings := DefaultRuntimeSettings()
+	if len(runtimeSettings) == 1 {
+		settings = runtimeSettings[0]
 	}
+	settings = NormalizeRuntimeSettings(settings, logger)
 
 	var ruleGroups []RuleGroup
-	if len(ruleGroupConfigs) == 0 {
+	if len(settings.RuleGroups) == 0 {
 		defaultLogger := log.New(os.Stdout, "", 0)
 		ruleGroups = append(ruleGroups, RuleGroup{
 			Name:          "default",
@@ -434,7 +287,7 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 			Logger:        defaultLogger,
 		})
 	} else {
-		for _, rgConfig := range ruleGroupConfigs {
+		for _, rgConfig := range settings.RuleGroups {
 			// Compile rules
 			var compiledRules []CompiledRule
 			for _, ruleStr := range rgConfig.Rules {
@@ -461,9 +314,9 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 			var messenger messaging.Messenger
 			switch rgConfig.Messaging.Type {
 			case "slack":
-				messenger = messaging.NewSlackMessenger(rgConfig.Messaging.URL, rgConfig.Messaging.Token, rgConfig.Messaging.Channel, asyncTimeout)
+				messenger = messaging.NewSlackMessenger(rgConfig.Messaging.URL, rgConfig.Messaging.Token, rgConfig.Messaging.Channel, settings.Async.Timeout)
 			case "slack_webhook":
-				messenger = messaging.NewSlackWebhookMessenger(rgConfig.Messaging.WebhookURL, asyncTimeout)
+				messenger = messaging.NewSlackWebhookMessenger(rgConfig.Messaging.WebhookURL, settings.Async.Timeout)
 			default:
 				if rgConfig.Messaging.Type != "" {
 					logger.Error("Invalid messenger type", "type", rgConfig.Messaging.Type)
@@ -480,7 +333,7 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 					return nil, fmt.Errorf("failed to create UDP forwarder: %w", err)
 				}
 				if udpFwd, ok := fwd.(*forwarder.UDPForwarder); ok {
-					udpFwd.SetTimeout(asyncTimeout)
+					udpFwd.SetTimeout(settings.Async.Timeout)
 				}
 			}
 
@@ -498,28 +351,44 @@ func New(logger *slog.Logger) (*AuditServer, error) {
 	server := &AuditServer{
 		logger:                logger,
 		ruleGroups:            ruleGroups,
-		auditTransport:        auditTransportProtocol(logger),
-		sideQueue:             make(chan sideTask, queueSize),
-		asyncEnqueueMode:      enqueueMode,
-		asyncEnqueueTimeout:   enqueueTimeout,
-		asyncWorkers:          workers,
-		asyncQueueSize:        queueSize,
-		asyncTimeout:          asyncTimeout,
-		asyncDurableEnabled:   durableEnabled,
-		asyncDurableDir:       durableDir,
-		asyncRetryMaxAttempts: retryMaxAttempts,
-		asyncRetryBackoff:     retryBackoff,
+		auditTransport:        settings.AuditProtocol,
+		asyncEnqueueMode:      settings.Async.EnqueueMode,
+		asyncEnqueueTimeout:   settings.Async.EnqueueTimeout,
+		asyncWorkers:          settings.Async.Workers,
+		asyncQueueSize:        settings.Async.QueueSize,
+		asyncTimeout:          settings.Async.Timeout,
+		asyncDurableEnabled:   settings.Async.Durable.Enabled,
+		asyncDurableDir:       settings.Async.Durable.Dir,
+		asyncRetryMaxAttempts: settings.Async.Retry.MaxAttempts,
+		asyncRetryBackoff:     settings.Async.Retry.Backoff,
 	}
-	if durableEnabled {
-		store, err := newFileSideTaskStore(durableDir)
+	server.ruleExecutor = newRuleGroupExecutor(ruleGroups, logger, server)
+	if settings.Async.Durable.Enabled {
+		store, err := newFileSideTaskStore(settings.Async.Durable.Dir)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create durable side task store: %w", err)
 		}
 		server.sideStore = store
 	}
-	server.startSideWorkers(workers)
-	if durableEnabled {
-		server.replayDurablePending()
+	server.sideProcessor = newSideEffectProcessor(sideEffectProcessorConfig{
+		logger:               logger,
+		queueSize:            settings.Async.QueueSize,
+		enqueueMode:          settings.Async.EnqueueMode,
+		enqueueTimeout:       settings.Async.EnqueueTimeout,
+		durableEnabled:       settings.Async.Durable.Enabled,
+		retryMaxAttempts:     settings.Async.Retry.MaxAttempts,
+		retryBackoff:         settings.Async.Retry.Backoff,
+		store:                server.sideStore,
+		adapterResolver:      server.resolveSideTaskAdapters,
+		mirrorDrops:          &server.sideDrops,
+		mirrorTaskSeq:        &server.sideTaskSeq,
+		mirrorQueue:          &server.sideQueue,
+		mirrorEnqueueMode:    &server.asyncEnqueueMode,
+		mirrorEnqueueTimeout: &server.asyncEnqueueTimeout,
+	})
+	server.sideProcessor.startWorkers(settings.Async.Workers)
+	if settings.Async.Durable.Enabled {
+		server.sideProcessor.replayDurablePending()
 	}
 	return server, nil
 }
