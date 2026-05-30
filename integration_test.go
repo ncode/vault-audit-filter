@@ -42,7 +42,7 @@ func auditAddressFromListener(listenerAddr net.Addr) string {
 	return net.JoinHostPort(host, port)
 }
 
-func tcpListenerHost() string {
+func auditListenerHost() string {
 	host := getEnvOrDefault("AUDIT_HOST", "127.0.0.1")
 	if host == "127.0.0.1" || host == "localhost" {
 		return host
@@ -86,7 +86,8 @@ func newIntegrationAuditServer(t *testing.T, protocol string, ruleGroups []audit
 
 func startUDPAuditListener(t *testing.T, server *auditserver.AuditServer) string {
 	t.Helper()
-	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	udpListenAddr := net.JoinHostPort(auditListenerHost(), "0")
+	addr, err := net.ResolveUDPAddr("udp", udpListenAddr)
 	require.NoError(t, err)
 
 	conn, err := net.ListenUDP("udp", addr)
@@ -120,7 +121,7 @@ func startUDPAuditListener(t *testing.T, server *auditserver.AuditServer) string
 
 func startTCPAuditListener(t *testing.T, server *auditserver.AuditServer) string {
 	t.Helper()
-	tcpListenAddr := net.JoinHostPort(tcpListenerHost(), "0")
+	tcpListenAddr := net.JoinHostPort(auditListenerHost(), "0")
 	addr, err := net.ResolveTCPAddr("tcp", tcpListenAddr)
 	require.NoError(t, err)
 
