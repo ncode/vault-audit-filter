@@ -3,7 +3,7 @@ module github.com/ncode/vault-audit-filter
 go 1.25.5
 
 require (
-	github.com/bytedance/sonic v1.15.1
+	github.com/bytedance/sonic v1.15.2
 	github.com/expr-lang/expr v1.17.8
 	github.com/hashicorp/vault/api v1.23.0
 	github.com/panjf2000/gnet/v2 v2.9.8
