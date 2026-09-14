@@ -64,8 +64,8 @@ OPENSPEC_TELEMETRY=0 DO_NOT_TRACK=1 openspec validate fix-side-effect-recovery -
   suite was not required for this change.
 - Reviewed the implementation, tests and documentation for scope and private
   information. Coverage output and raw verification logs are excluded.
-- The spec-synchronization coordination note in `design.md` remains applicable;
-  neither this change nor the earlier architecture change was archived.
+- The spec-synchronization coordination note in `design.md` was resolved when
+  both completed changes were archived and their requirements synchronized.
 
 ### Go 1.27.1 follow-up validation
 
@@ -84,3 +84,11 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build ./...
 The vulnerability scan found no vulnerabilities. Native and Linux/amd64 builds
 passed. Coverage on Go 1.27.1 is 98.2% overall and remains 100% in all three
 changed production files. Temporary test infrastructure was removed afterward.
+
+### Archive
+
+Archived on 2026-09-14 after all 22 tasks completed. The durable recovery
+requirements are synchronized to `openspec/specs/durable-side-effect-recovery/spec.md`.
+`openspec validate --all --strict` passes. The earlier architecture proposal
+was also archived, with its durable retry scenario updated to reference the
+successor recovery contract described in `design.md`.

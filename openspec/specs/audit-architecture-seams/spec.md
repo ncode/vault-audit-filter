@@ -1,4 +1,9 @@
-## ADDED Requirements
+# audit-architecture-seams Specification
+
+## Purpose
+Define module boundaries for configuration, Vault audit setup, rule execution, side-effect delivery, transport framing, and integration tests while preserving their documented behavior.
+
+## Requirements
 
 ### Requirement: Explicit configuration assembly
 
@@ -76,10 +81,10 @@ The system SHALL own async side-effect delivery through a side-effect processor 
 - **WHEN** side-effect enqueue mode is wait and the queue remains full
 - **THEN** submission SHALL wait up to the configured timeout and then preserve current drop or durable retry behavior
 
-#### Scenario: Durable retry behavior remains stable
+#### Scenario: Durable recovery follows the recovery contract
 
-- **WHEN** durable side effects are enabled and delivery fails
-- **THEN** persistence, replay, retry, max-attempt, and dead-letter behavior SHALL remain equivalent to current behavior
+- **WHEN** durable side effects are enabled and delivery fails or pending work is recovered
+- **THEN** persistence, replay, retry limits, and dead-letter handoff SHALL follow the `durable-side-effect-recovery` contract
 
 #### Scenario: Side-effect adapters remain substitutable
 

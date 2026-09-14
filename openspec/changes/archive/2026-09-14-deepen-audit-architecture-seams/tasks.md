@@ -59,3 +59,10 @@
 - [x] 8.4 Run `go test -v -race ./...`.
 - [x] 8.5 Run coverage commands and close misses/partials in changed packages.
 - [x] 8.6 If integration paths changed, run `go test -tags=integration -v -race ./...`.
+
+## Archive
+
+Archived on 2026-09-14 with all 38 tasks complete. Requirements are synchronized
+to `openspec/specs/audit-architecture-seams/spec.md`. The durable retry scenario
+now follows `durable-side-effect-recovery`, superseding the original behavior
+preservation constraint. `openspec validate --all --strict` passes.
