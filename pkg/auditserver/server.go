@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/expr-lang/expr"
@@ -129,24 +128,11 @@ type LogFileConfig struct {
 
 type AuditServer struct {
 	*gnet.BuiltinEventEngine
-	logger                *slog.Logger
-	ruleGroups            []RuleGroup
-	ruleExecutor          ruleGroupExecutor
-	auditTransport        string
-	sideQueue             chan sideTask
-	sideDrops             atomic.Uint64
-	sideProcessor         *sideEffectProcessor
-	asyncEnqueueMode      string
-	asyncEnqueueTimeout   time.Duration
-	asyncWorkers          int
-	asyncQueueSize        int
-	asyncTimeout          time.Duration
-	asyncDurableEnabled   bool
-	asyncDurableDir       string
-	asyncRetryMaxAttempts int
-	asyncRetryBackoff     time.Duration
-	sideStore             sideTaskStore
-	sideTaskSeq           atomic.Uint64
+	logger         *slog.Logger
+	ruleGroups     []RuleGroup
+	ruleExecutor   ruleGroupExecutor
+	auditTransport string
+	sideProcessor  *sideEffectProcessor
 }
 
 // MatchResult describes the outcome of matching a single audit frame.
@@ -345,42 +331,29 @@ func New(logger *slog.Logger, runtimeSettings ...RuntimeSettings) (*AuditServer,
 	}
 
 	server := &AuditServer{
-		logger:                logger,
-		ruleGroups:            ruleGroups,
-		auditTransport:        settings.AuditProtocol,
-		asyncEnqueueMode:      settings.Async.EnqueueMode,
-		asyncEnqueueTimeout:   settings.Async.EnqueueTimeout,
-		asyncWorkers:          settings.Async.Workers,
-		asyncQueueSize:        settings.Async.QueueSize,
-		asyncTimeout:          settings.Async.Timeout,
-		asyncDurableEnabled:   settings.Async.Durable.Enabled,
-		asyncDurableDir:       settings.Async.Durable.Dir,
-		asyncRetryMaxAttempts: settings.Async.Retry.MaxAttempts,
-		asyncRetryBackoff:     settings.Async.Retry.Backoff,
+		logger:         logger,
+		ruleGroups:     ruleGroups,
+		auditTransport: settings.AuditProtocol,
 	}
 	server.ruleExecutor = newRuleGroupExecutor(ruleGroups, logger, server)
+	var store sideTaskStore
 	if settings.Async.Durable.Enabled {
-		store, err := newFileSideTaskStore(settings.Async.Durable.Dir)
+		var err error
+		store, err = newFileSideTaskStore(settings.Async.Durable.Dir)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create durable side task store: %w", err)
 		}
-		server.sideStore = store
 	}
 	server.sideProcessor = newSideEffectProcessor(sideEffectProcessorConfig{
-		logger:               logger,
-		queueSize:            settings.Async.QueueSize,
-		enqueueMode:          settings.Async.EnqueueMode,
-		enqueueTimeout:       settings.Async.EnqueueTimeout,
-		durableEnabled:       settings.Async.Durable.Enabled,
-		retryMaxAttempts:     settings.Async.Retry.MaxAttempts,
-		retryBackoff:         settings.Async.Retry.Backoff,
-		store:                server.sideStore,
-		adapterResolver:      server.resolveSideTaskAdapters,
-		mirrorDrops:          &server.sideDrops,
-		mirrorTaskSeq:        &server.sideTaskSeq,
-		mirrorQueue:          &server.sideQueue,
-		mirrorEnqueueMode:    &server.asyncEnqueueMode,
-		mirrorEnqueueTimeout: &server.asyncEnqueueTimeout,
+		logger:           logger,
+		queueSize:        settings.Async.QueueSize,
+		enqueueMode:      settings.Async.EnqueueMode,
+		enqueueTimeout:   settings.Async.EnqueueTimeout,
+		durableEnabled:   settings.Async.Durable.Enabled,
+		retryMaxAttempts: settings.Async.Retry.MaxAttempts,
+		retryBackoff:     settings.Async.Retry.Backoff,
+		store:            store,
+		adapterResolver:  server.resolveSideTaskAdapters,
 	})
 	server.sideProcessor.startWorkers(settings.Async.Workers)
 	if settings.Async.Durable.Enabled {

@@ -33,7 +33,7 @@ These instructions will help you set up and run `vault-audit-filter` on your loc
 
 ### Prerequisites
 
-- **Go**: Ensure you have Go 1.25.5 or later installed. You can download it here: <https://golang.org/dl/>
+- **Go**: Ensure you have Go 1.27.1 or later installed. You can download it here: <https://golang.org/dl/>
 - **Vault**: You should have HashiCorp Vault installed and configured. Instructions can be found here: <https://www.vaultproject.io/docs/install>
 
 ### Installation
@@ -137,9 +137,47 @@ Once you have built the project, you can run the `vault-audit-filter` executable
   - `messaging.channel`: The channel ID for Slack messages (when using "slack" type).
 
   - **Async Settings**:
-  - `async.queue_size`: Bounded queue length for async side effects (drop on full).
+  - `async.queue_size`: Bounded queue length for async side effects.
   - `async.workers`: Number of async side-effect workers (`0` disables worker execution).
   - `async.timeout`: Timeout for Slack API/webhook and forwarding operations.
+
+### Durable side-effect recovery
+
+Side effects are best-effort by default. Set `async.durable.enabled: true` to
+persist accepted tasks under `async.durable.dir` before queueing them. A full
+queue retains durable work for retry without counting a drop. In non-durable
+mode, `async.enqueue_mode` selects immediate rejection (`drop`, the default)
+or waiting up to `async.enqueue_timeout` (`wait`).
+
+Each accepted durable task stores its **delivery limit** from
+`async.retry.max_attempts` (default `3`). Changing configuration affects new
+tasks, not existing ones. Legacy pending records without a limit adopt the
+current limit once, preserving their attempt count, and persist it before
+delivery. Invalid accounting is reported and retained without delivery.
+
+A **delivery attempt** is reserved and persisted before contacting either
+destination. Notification and forwarding share one attempt; if only one
+succeeds, a permitted retry still attempts both. Reservation failures send
+nothing and retry persistence without consuming extra attempts. An interruption
+after reservation can consume an attempt even if no send occurred. Recovery of
+an exhausted task never sends again: it retains a recorded final failure or
+archives an explicit unknown outcome for an interrupted final attempt.
+
+Dead-letter handoff stores the archive before removing pending work. Failed
+archival or cleanup retries automatically at `async.retry.backoff` (default
+`100ms`), without delivering again or consuming attempts. An existing archive
+takes precedence over an overlapping pending record, including legacy records,
+and its reason is preserved. Cleanup after successful delivery also retries
+without sending again in the running process. With `async.workers: 0`, delivery
+and dead-letter processing remain disabled.
+
+Pending updates publish complete files by replacement, leaving the previous
+record intact if publication fails; recovery ignores incomplete temporary
+writes. This protects process-interruption recovery, not whole-machine power
+loss. Delivery is not exactly-once: an interrupted successful send with remaining
+allowance may be retried after restart. Older binaries do not enforce the new
+reservation and fixed-limit rules; preserve pending data for a compatible
+reader rather than relying on these guarantees after a downgrade.
 
 ### Async Tuning Profiles
 
@@ -162,7 +200,7 @@ Representative stress-test results (2000 requests, concurrency 64, slow downstre
 
 Interpretation:
 - Current async design is appropriate when request-path latency protection is the top priority.
-- If side-effect delivery reliability is required, increase queue/workers and monitor drops, or move to a durable retry design.
+- If side-effect delivery reliability is required, enable durable recovery and monitor pending work and dead letters.
 
 ### Performance Findings and Decision
 
@@ -178,13 +216,13 @@ Current decision:
 - Operate in latency-first async mode by default.
 - Treat side effects as best-effort unless deployment requirements explicitly demand stronger delivery guarantees.
 
-When durable/retry work is needed:
+When durable recovery is useful:
 - Side-effect drops remain sustained and unacceptable after tuning `async.workers` and `async.queue_size`.
 - Audit/operational requirements require stronger guarantees than best-effort delivery.
 
 Follow-up options:
-1. Add bounded blocking enqueue mode to trade some request latency for fewer drops.
-2. Add durable retry and dead-letter flow for stronger side-effect delivery guarantees.
+1. Use bounded waiting enqueue mode to trade some request latency for fewer non-durable drops.
+2. Enable durable recovery and inspect exhausted tasks in the dead-letter directory.
 3. Re-run workload-specific tuning tests and adjust profile recommendations.
 
 Tuning checklist:
@@ -192,7 +230,7 @@ Tuning checklist:
 2. Monitor side-effect drop count and request tail latency.
 3. If drops are sustained and unacceptable, raise `async.workers` first, then `async.queue_size`.
 4. If request tail latency regresses, reduce workers or move to a balanced profile.
-5. If drops remain unacceptable, adopt durable retry architecture rather than unbounded tuning.
+5. If drops remain unacceptable, enable durable recovery.
 
 ### Rule Syntax
 

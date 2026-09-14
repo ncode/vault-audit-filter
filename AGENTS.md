@@ -20,8 +20,8 @@ Repository-specific guidance for agentic coding assistants working in `vault-aud
 
 ## Toolchain and environment
 
-- Go version: `1.25.x` (see `go.mod` and GitHub Actions workflows).
-- CI forces toolchain via: `go env -w GOTOOLCHAIN=go1.25.0+auto`.
+- Go version: `1.27.1` or later (see `go.mod`).
+- CI reads the Go version from `go.mod` through `actions/setup-go`.
 - Integration tests expect a running Vault dev server.
 - Default local integration env values:
   - `VAULT_ADDR=http://127.0.0.1:8200`
