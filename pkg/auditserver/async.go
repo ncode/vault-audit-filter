@@ -1,6 +1,7 @@
 package auditserver
 
 import (
+	"fmt"
 	"log/slog"
 	"strconv"
 	"sync/atomic"
@@ -13,30 +14,28 @@ import (
 var defaultSideWorkers = 2
 
 type sideTask struct {
-	id         string
-	groupName  string
-	attempts   int
-	payload    []byte
-	payloadStr string
-	messenger  messaging.Messenger
-	forwarder  forwarder.Forwarder
+	id          string
+	groupName   string
+	attempts    int
+	maxAttempts int
+	lastError   string
+	cleanupOnly bool
+	payload     []byte
+	payloadStr  string
+	messenger   messaging.Messenger
+	forwarder   forwarder.Forwarder
 }
 
 type sideEffectProcessorConfig struct {
-	logger               *slog.Logger
-	queueSize            int
-	enqueueMode          string
-	enqueueTimeout       time.Duration
-	durableEnabled       bool
-	retryMaxAttempts     int
-	retryBackoff         time.Duration
-	store                sideTaskStore
-	adapterResolver      sideTaskAdapterResolver
-	mirrorDrops          *atomic.Uint64
-	mirrorTaskSeq        *atomic.Uint64
-	mirrorQueue          *chan sideTask
-	mirrorEnqueueMode    *string
-	mirrorEnqueueTimeout *time.Duration
+	logger           *slog.Logger
+	queueSize        int
+	enqueueMode      string
+	enqueueTimeout   time.Duration
+	durableEnabled   bool
+	retryMaxAttempts int
+	retryBackoff     time.Duration
+	store            sideTaskStore
+	adapterResolver  sideTaskAdapterResolver
 }
 
 type sideTaskAdapters struct {
@@ -58,11 +57,15 @@ type sideEffectProcessor struct {
 	retryBackoff     time.Duration
 	store            sideTaskStore
 	adapterResolver  sideTaskAdapterResolver
-	mirrorDrops      *atomic.Uint64
-	mirrorTaskSeq    *atomic.Uint64
 }
 
 func newSideEffectProcessor(config sideEffectProcessorConfig) *sideEffectProcessor {
+	if config.retryMaxAttempts <= 0 {
+		config.retryMaxAttempts = defaultRetryMaxAttempts
+	}
+	if config.retryBackoff <= 0 {
+		config.retryBackoff = defaultRetryBackoff
+	}
 	queueSize := config.queueSize
 	if queueSize <= 0 {
 		queueSize = defaultAsyncQueueSize
@@ -77,17 +80,6 @@ func newSideEffectProcessor(config sideEffectProcessorConfig) *sideEffectProcess
 		retryBackoff:     config.retryBackoff,
 		store:            config.store,
 		adapterResolver:  config.adapterResolver,
-		mirrorDrops:      config.mirrorDrops,
-		mirrorTaskSeq:    config.mirrorTaskSeq,
-	}
-	if config.mirrorQueue != nil {
-		*config.mirrorQueue = processor.queue
-	}
-	if config.mirrorEnqueueMode != nil {
-		*config.mirrorEnqueueMode = processor.enqueueMode
-	}
-	if config.mirrorEnqueueTimeout != nil {
-		*config.mirrorEnqueueTimeout = processor.enqueueTimeout
 	}
 	return processor
 }
@@ -107,14 +99,21 @@ func (p *sideEffectProcessor) enqueue(task sideTask) bool {
 		if task.id == "" {
 			task.id = p.nextTaskID()
 		}
-		if err := p.store.Save(task); err != nil {
-			if p.logger != nil {
-				p.logger.Error("Failed to persist durable side task", "error", err)
+		if task.maxAttempts == 0 {
+			task.maxAttempts = p.retryMaxAttempts
+		}
+		if !task.cleanupOnly {
+			if err := p.store.Save(task); err != nil {
+				p.storageFailure("accept", err)
+				return false
 			}
-			return false
 		}
 	}
+	return p.queueTask(task)
+}
 
+// Internal queue retries never rewrite a task or reserve a delivery attempt.
+func (p *sideEffectProcessor) queueTask(task sideTask) bool {
 	if p.enqueueMode == "wait" {
 		timeout := p.enqueueTimeout
 		if timeout <= 0 {
@@ -127,9 +126,7 @@ func (p *sideEffectProcessor) enqueue(task sideTask) bool {
 			return true
 		case <-timer.C:
 			if p.durableEnabled {
-				time.AfterFunc(p.retryBackoff, func() {
-					_ = p.enqueue(task)
-				})
+				p.retry(task)
 				return true
 			}
 			p.addDrop()
@@ -142,9 +139,7 @@ func (p *sideEffectProcessor) enqueue(task sideTask) bool {
 		return true
 	default:
 		if p.durableEnabled {
-			time.AfterFunc(p.retryBackoff, func() {
-				_ = p.enqueue(task)
-			})
+			p.retry(task)
 			return true
 		}
 		p.addDrop()
@@ -153,12 +148,7 @@ func (p *sideEffectProcessor) enqueue(task sideTask) bool {
 }
 
 func (p *sideEffectProcessor) nextTaskID() string {
-	var n uint64
-	if p.mirrorTaskSeq != nil {
-		n = p.mirrorTaskSeq.Add(1)
-	} else {
-		n = p.taskSeq.Add(1)
-	}
+	n := p.taskSeq.Add(1)
 	return time.Now().Format("20060102150405.000000000") + "-" + strconv.FormatUint(n, 10)
 }
 
@@ -176,6 +166,30 @@ func (p *sideEffectProcessor) startWorkers(n int) {
 }
 
 func (p *sideEffectProcessor) process(task sideTask) {
+	durable := p.durableEnabled && p.store != nil && task.id != ""
+	if durable {
+		if task.cleanupOnly {
+			p.cleanup(task)
+			return
+		}
+		if task.maxAttempts == 0 {
+			task.maxAttempts = p.retryMaxAttempts
+		}
+		if task.attempts >= task.maxAttempts {
+			p.deadLetter(task)
+			return
+		}
+		reserved := task
+		reserved.attempts++
+		reserved.lastError = ""
+		if err := p.store.Save(reserved); err != nil {
+			p.storageFailure("reserve", err)
+			p.retry(task)
+			return
+		}
+		task = reserved
+	}
+
 	messenger := task.messenger
 	fwd := task.forwarder
 	if task.groupName != "" && p.adapterResolver != nil {
@@ -208,41 +222,66 @@ func (p *sideEffectProcessor) process(task sideTask) {
 		}
 	}
 
-	if !p.durableEnabled || p.store == nil || task.id == "" {
+	if !durable {
 		return
 	}
 
 	if sendErr == nil {
-		_ = p.store.Delete(task.id)
+		task.cleanupOnly = true
+		p.cleanup(task)
 		return
 	}
 
-	task.attempts++
-	if task.attempts >= p.retryMaxAttempts {
-		_ = p.store.MoveToDeadLetter(task, sendErr.Error())
-		_ = p.store.Delete(task.id)
+	task.lastError = sendErr.Error()
+	if task.attempts >= task.maxAttempts {
+		p.deadLetter(task)
 		return
 	}
+	p.retry(task)
+}
 
-	if err := p.store.Save(task); err != nil && p.logger != nil {
-		p.logger.Error("Failed to save retry side task", "error", err)
+// Persist the final outcome before archival so recovery retains a known
+// failure. The reserved count already prevents redelivery if this write fails.
+func (p *sideEffectProcessor) deadLetter(task sideTask) {
+	if task.lastError == "" {
+		task.lastError = "final attempt interrupted; outcome unknown"
 	}
+	if err := p.store.Save(task); err != nil {
+		p.storageFailure("record outcome", err)
+		p.retry(task)
+		return
+	}
+	if err := p.store.MoveToDeadLetter(task, task.lastError); err != nil {
+		p.storageFailure("archive", err)
+		p.retry(task)
+	}
+}
+
+func (p *sideEffectProcessor) cleanup(task sideTask) {
+	if err := p.store.Delete(task.id); err != nil {
+		p.storageFailure("cleanup", err)
+		p.retry(task)
+	}
+}
+
+func (p *sideEffectProcessor) retry(task sideTask) {
 	time.AfterFunc(p.retryBackoff, func() {
-		_ = p.enqueue(task)
+		p.queueTask(task)
 	})
 }
 
-func (p *sideEffectProcessor) Drops() uint64 {
-	if p.mirrorDrops != nil {
-		return p.mirrorDrops.Load()
+func (p *sideEffectProcessor) storageFailure(operation string, err error) {
+	if p.logger != nil {
+		// Store errors may embed paths, payloads or credentials. Log the error
+		// type and operation, keeping the sensitive error text in the adapter.
+		p.logger.Error("Durable side task storage failed", "operation", operation, "error_type", fmt.Sprintf("%T", err))
 	}
+}
+
+func (p *sideEffectProcessor) Drops() uint64 {
 	return p.drops.Load()
 }
 
 func (p *sideEffectProcessor) addDrop() {
-	if p.mirrorDrops != nil {
-		p.mirrorDrops.Add(1)
-		return
-	}
 	p.drops.Add(1)
 }

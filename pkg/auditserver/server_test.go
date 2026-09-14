@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -443,11 +442,9 @@ func TestNew_AsyncDefaults(t *testing.T) {
 	server, err := New(nil)
 	require.NoError(t, err)
 	require.NotNil(t, server)
-	assert.Equal(t, "drop", server.asyncEnqueueMode)
-	assert.Equal(t, 5*time.Millisecond, server.asyncEnqueueTimeout)
-	assert.Equal(t, 2, server.asyncWorkers)
-	assert.Equal(t, 20, server.asyncQueueSize)
-	assert.Equal(t, 5*time.Second, server.asyncTimeout)
+	assert.Equal(t, "drop", server.sideProcessor.enqueueMode)
+	assert.Equal(t, 5*time.Millisecond, server.sideProcessor.enqueueTimeout)
+	assert.Equal(t, 20, cap(server.sideProcessor.queue))
 }
 
 func TestNew_UsesExplicitRuntimeSettings(t *testing.T) {
@@ -477,15 +474,13 @@ func TestNew_UsesExplicitRuntimeSettings(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, server)
 	assert.Equal(t, "tcp", server.auditTransport)
-	assert.Equal(t, 7, server.asyncQueueSize)
-	assert.Equal(t, 0, server.asyncWorkers)
-	assert.Equal(t, "wait", server.asyncEnqueueMode)
-	assert.Equal(t, 11*time.Millisecond, server.asyncEnqueueTimeout)
-	assert.Equal(t, 17*time.Millisecond, server.asyncTimeout)
-	assert.True(t, server.asyncDurableEnabled)
-	assert.Equal(t, settings.Async.Durable.Dir, server.asyncDurableDir)
-	assert.Equal(t, 5, server.asyncRetryMaxAttempts)
-	assert.Equal(t, 23*time.Millisecond, server.asyncRetryBackoff)
+	assert.Equal(t, 7, cap(server.sideProcessor.queue))
+	assert.Equal(t, "wait", server.sideProcessor.enqueueMode)
+	assert.Equal(t, 11*time.Millisecond, server.sideProcessor.enqueueTimeout)
+	assert.True(t, server.sideProcessor.durableEnabled)
+	assert.Equal(t, settings.Async.Durable.Dir, server.sideProcessor.store.(*fileSideTaskStore).baseDir)
+	assert.Equal(t, 5, server.sideProcessor.retryMaxAttempts)
+	assert.Equal(t, 23*time.Millisecond, server.sideProcessor.retryBackoff)
 	require.Len(t, server.ruleGroups, 1)
 	assert.Equal(t, "explicit", server.ruleGroups[0].Name)
 }
@@ -497,8 +492,8 @@ func TestNew_InvalidEnqueueModeFallsBackToDrop(t *testing.T) {
 
 	server, err := New(nil, settings)
 	require.NoError(t, err)
-	assert.Equal(t, "drop", server.asyncEnqueueMode)
-	assert.Equal(t, 12*time.Millisecond, server.asyncEnqueueTimeout)
+	assert.Equal(t, "drop", server.sideProcessor.enqueueMode)
+	assert.Equal(t, 12*time.Millisecond, server.sideProcessor.enqueueTimeout)
 }
 
 func TestSideQueue_DropsWhenFull(t *testing.T) {
@@ -525,7 +520,7 @@ func TestSideQueue_DropsWhenFull(t *testing.T) {
 	_, _ = srv.React(frame, nil)
 	_, _ = srv.React(frame, nil)
 
-	assert.Equal(t, uint64(1), srv.sideDrops.Load())
+	assert.Equal(t, uint64(1), srv.sideProcessor.Drops())
 }
 
 func TestReact_AsyncMessengerCalled(t *testing.T) {
@@ -652,36 +647,10 @@ func TestEnqueueSide_DropMode_DropsImmediatelyWhenFull(t *testing.T) {
 	assert.Less(t, elapsed, 10*time.Millisecond)
 }
 
-func TestSideEffectProcessor_MirrorsDropAndTaskSequence(t *testing.T) {
-	var drops atomic.Uint64
-	var seq atomic.Uint64
-	var queue chan sideTask
-	var mode string
-	var timeout time.Duration
-
-	processor := newSideEffectProcessor(sideEffectProcessorConfig{
-		logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
-		queueSize:            1,
-		enqueueMode:          "wait",
-		enqueueTimeout:       7 * time.Millisecond,
-		mirrorDrops:          &drops,
-		mirrorTaskSeq:        &seq,
-		mirrorQueue:          &queue,
-		mirrorEnqueueMode:    &mode,
-		mirrorEnqueueTimeout: &timeout,
-	})
-
-	require.NotNil(t, queue)
-	assert.Equal(t, "wait", mode)
-	assert.Equal(t, 7*time.Millisecond, timeout)
-	id := processor.nextTaskID()
-	assert.True(t, strings.HasSuffix(id, "-1"))
-
-	processor.queue <- sideTask{}
-	ok := processor.Submit(sideEffectRequest{})
-	assert.False(t, ok)
-	assert.Equal(t, uint64(1), processor.Drops())
-	assert.Equal(t, uint64(1), drops.Load())
+func TestSideEffectProcessor_TaskSequence(t *testing.T) {
+	processor := newSideEffectProcessor(sideEffectProcessorConfig{})
+	assert.True(t, strings.HasSuffix(processor.nextTaskID(), "-1"))
+	assert.True(t, strings.HasSuffix(processor.nextTaskID(), "-2"))
 }
 
 func TestSideEffectProcessor_DefaultQueueSize(t *testing.T) {
@@ -1289,24 +1258,10 @@ func (c *captureSideEffects) submitSideEffect(req sideEffectRequest) bool {
 }
 
 func attachTestSideProcessor(srv *AuditServer, queueSize, workers int) {
-	if queueSize <= 0 {
-		queueSize = 1
-	}
 	srv.sideProcessor = newSideEffectProcessor(sideEffectProcessorConfig{
-		logger:               srv.logger,
-		queueSize:            queueSize,
-		enqueueMode:          srv.asyncEnqueueMode,
-		enqueueTimeout:       srv.asyncEnqueueTimeout,
-		durableEnabled:       srv.asyncDurableEnabled,
-		retryMaxAttempts:     srv.asyncRetryMaxAttempts,
-		retryBackoff:         srv.asyncRetryBackoff,
-		store:                srv.sideStore,
-		adapterResolver:      srv.resolveSideTaskAdapters,
-		mirrorDrops:          &srv.sideDrops,
-		mirrorTaskSeq:        &srv.sideTaskSeq,
-		mirrorQueue:          &srv.sideQueue,
-		mirrorEnqueueMode:    &srv.asyncEnqueueMode,
-		mirrorEnqueueTimeout: &srv.asyncEnqueueTimeout,
+		logger:          srv.logger,
+		queueSize:       queueSize,
+		adapterResolver: srv.resolveSideTaskAdapters,
 	})
 	srv.sideProcessor.startWorkers(workers)
 }
@@ -1581,7 +1536,6 @@ func TestReact_WriteErrorAndLoggerPayloadBranches(t *testing.T) {
 				CompiledRules: nil,
 				Writer:        errWriter{},
 			}},
-			sideQueue: make(chan sideTask, 1),
 		}
 		_, action := srv.React(frame, nil)
 		require.Equal(t, gnet.None, action)
@@ -1656,7 +1610,7 @@ func TestNew_AsyncEnqueueModeBlankFallsBackToDrop(t *testing.T) {
 
 	server, err := New(nil, settings)
 	require.NoError(t, err)
-	assert.Equal(t, "drop", server.asyncEnqueueMode)
+	assert.Equal(t, "drop", server.sideProcessor.enqueueMode)
 }
 
 func TestNew_WithSlackMessengerAndDurableEnabled(t *testing.T) {
@@ -1677,8 +1631,8 @@ func TestNew_WithSlackMessengerAndDurableEnabled(t *testing.T) {
 
 	server, err := New(nil, settings)
 	require.NoError(t, err)
-	require.NotNil(t, server.sideStore)
-	require.True(t, server.asyncDurableEnabled)
+	require.NotNil(t, server.sideProcessor.store)
+	require.True(t, server.sideProcessor.durableEnabled)
 	require.Len(t, server.ruleGroups, 1)
 	require.NotNil(t, server.ruleGroups[0].Messenger)
 }
@@ -1795,12 +1749,19 @@ type errSideTaskStore struct {
 
 func (s *errSideTaskStore) Save(task sideTask) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.saveCalls++
-	if s.saveErr == nil {
-		s.pending = append(s.pending, task)
+	if s.saveErr != nil {
+		return s.saveErr
 	}
-	s.mu.Unlock()
-	return s.saveErr
+	for i := range s.pending {
+		if s.pending[i].id == task.id {
+			s.pending[i] = task
+			return nil
+		}
+	}
+	s.pending = append(s.pending, task)
+	return nil
 }
 
 func (s *errSideTaskStore) Delete(id string) error {
@@ -1822,10 +1783,13 @@ func (s *errSideTaskStore) Delete(id string) error {
 func (s *errSideTaskStore) MoveToDeadLetter(task sideTask, reason string) error {
 	s.mu.Lock()
 	s.deadCalls++
+	err := s.deadErr
 	s.mu.Unlock()
-	_ = task
 	_ = reason
-	return s.deadErr
+	if err != nil {
+		return err
+	}
+	return s.Delete(task.id)
 }
 
 func (s *errSideTaskStore) Pending() ([]sideTask, error) {
@@ -1861,14 +1825,12 @@ func TestNew_AsyncInvalidConfigFallsBackToDefaults(t *testing.T) {
 	server, err := New(nil, settings)
 	require.NoError(t, err)
 	require.NotNil(t, server)
-	assert.Equal(t, 20, server.asyncQueueSize)
-	assert.Equal(t, defaultSideWorkers, server.asyncWorkers)
-	assert.Equal(t, "drop", server.asyncEnqueueMode)
-	assert.Equal(t, 5*time.Millisecond, server.asyncEnqueueTimeout)
-	assert.Equal(t, 5*time.Second, server.asyncTimeout)
-	assert.Equal(t, "./.vault-audit-filter-sideeffects", server.asyncDurableDir)
-	assert.Equal(t, 3, server.asyncRetryMaxAttempts)
-	assert.Equal(t, 100*time.Millisecond, server.asyncRetryBackoff)
+	assert.Equal(t, 20, cap(server.sideProcessor.queue))
+	assert.Equal(t, "drop", server.sideProcessor.enqueueMode)
+	assert.Equal(t, 5*time.Millisecond, server.sideProcessor.enqueueTimeout)
+	assert.Equal(t, DefaultRuntimeSettings(), NormalizeRuntimeSettings(settings, nil))
+	assert.Equal(t, 3, server.sideProcessor.retryMaxAttempts)
+	assert.Equal(t, 100*time.Millisecond, server.sideProcessor.retryBackoff)
 }
 
 func TestEnqueueSide_DurableSaveFailureReturnsFalse(t *testing.T) {
@@ -1964,7 +1926,6 @@ func TestOnTraffic(t *testing.T) {
 		srv := &AuditServer{
 			logger:     logger,
 			ruleGroups: []RuleGroup{{Name: "always", Writer: new(bytes.Buffer)}},
-			sideQueue:  make(chan sideTask, 1),
 		}
 
 		action := srv.OnTraffic(&fakeTrafficConn{frame: auditFrame()})
@@ -1981,7 +1942,6 @@ func TestOnTraffic_TCP(t *testing.T) {
 			logger:         logger,
 			auditTransport: "tcp",
 			ruleGroups:     []RuleGroup{{Name: "all", CompiledRules: nil, Writer: buf}},
-			sideQueue:      make(chan sideTask, 1),
 		}
 
 		stream := append(auditFrame(), '\n')
@@ -2003,7 +1963,6 @@ func TestOnTraffic_TCP(t *testing.T) {
 			logger:         logger,
 			auditTransport: "tcp",
 			ruleGroups:     []RuleGroup{{Name: "all", CompiledRules: nil, Writer: buf}},
-			sideQueue:      make(chan sideTask, 1),
 		}
 
 		line := auditFrame()
