@@ -1,6 +1,7 @@
 package auditserver
 
 import (
+	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -50,6 +51,7 @@ type sideEffectProcessor struct {
 	queue            chan sideTask
 	drops            atomic.Uint64
 	taskSeq          atomic.Uint64
+	taskIDPrefix     string
 	enqueueMode      string
 	enqueueTimeout   time.Duration
 	durableEnabled   bool
@@ -73,6 +75,7 @@ func newSideEffectProcessor(config sideEffectProcessorConfig) *sideEffectProcess
 	processor := &sideEffectProcessor{
 		logger:           config.logger,
 		queue:            make(chan sideTask, queueSize),
+		taskIDPrefix:     rand.Text() + "-",
 		enqueueMode:      config.enqueueMode,
 		enqueueTimeout:   config.enqueueTimeout,
 		durableEnabled:   config.durableEnabled,
@@ -149,7 +152,7 @@ func (p *sideEffectProcessor) queueTask(task sideTask) bool {
 
 func (p *sideEffectProcessor) nextTaskID() string {
 	n := p.taskSeq.Add(1)
-	return time.Now().Format("20060102150405.000000000") + "-" + strconv.FormatUint(n, 10)
+	return p.taskIDPrefix + time.Now().Format("20060102150405.000000000") + "-" + strconv.FormatUint(n, 10)
 }
 
 func (p *sideEffectProcessor) startWorkers(n int) {

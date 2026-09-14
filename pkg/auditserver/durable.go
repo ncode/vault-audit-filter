@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type sideTaskStore interface {
@@ -234,9 +235,15 @@ func (p *sideEffectProcessor) replayDurablePending() {
 	tasks, err := p.store.Pending()
 	if err != nil {
 		p.storageFailure("load pending", err)
+		time.AfterFunc(p.retryBackoff, p.replayDurablePending)
 		return
 	}
 	for _, task := range tasks {
+		// This processor already owns newly accepted tasks, including ones in
+		// flight while a startup load retries. Never enqueue their snapshots.
+		if strings.HasPrefix(task.id, p.taskIDPrefix) {
+			continue
+		}
 		if !p.enqueue(task) {
 			p.retry(task)
 		}
