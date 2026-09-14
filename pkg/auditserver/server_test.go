@@ -1740,7 +1740,6 @@ type errSideTaskStore struct {
 	saveErr     error
 	deleteErr   error
 	deadErr     error
-	pendingErr  error
 	pending     []sideTask
 	saveCalls   int
 	deleteCalls int
@@ -1793,9 +1792,6 @@ func (s *errSideTaskStore) MoveToDeadLetter(task sideTask, reason string) error 
 }
 
 func (s *errSideTaskStore) Pending() ([]sideTask, error) {
-	if s.pendingErr != nil {
-		return nil, s.pendingErr
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]sideTask, len(s.pending))
@@ -1899,18 +1895,11 @@ func TestFileSideTaskStore_Branches(t *testing.T) {
 	})
 }
 
-func TestReplayDurablePending_NoStoreOrPendingError(t *testing.T) {
+func TestReplayDurablePending_NoStore(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	noStore := newSideEffectProcessor(sideEffectProcessorConfig{logger: logger, queueSize: 1})
 	noStore.replayDurablePending()
-
-	withErr := newSideEffectProcessor(sideEffectProcessorConfig{
-		logger:    logger,
-		queueSize: 1,
-		store:     &errSideTaskStore{pendingErr: errors.New("boom")},
-	})
-	withErr.replayDurablePending()
 }
 
 func TestOnTraffic(t *testing.T) {

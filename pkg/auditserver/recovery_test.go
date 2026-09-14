@@ -571,3 +571,64 @@ func TestFileSideTaskStore_FailedHandoffCleanup(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "known failure")
 }
+
+func TestReplayDurablePending_RetriesLoadWithoutDuplicatingLiveTasks(t *testing.T) {
+	for _, name := range []string{"recovered only", "with queued live task", "with retrying live task"} {
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				files, err := newFileSideTaskStore(t.TempDir())
+				require.NoError(t, err)
+				previous := newSideEffectProcessor(sideEffectProcessorConfig{})
+				recoveredID := previous.nextTaskID()
+				require.NoError(t, files.Save(sideTask{id: recoveredID, attempts: 1, maxAttempts: 3}))
+				// An unreadable dead letter prevents the initial pending snapshot.
+				blocked := filepath.Join(files.deadDir, recoveredID+".json")
+				require.NoError(t, os.Mkdir(blocked, 0o700))
+				var logs bytes.Buffer
+				p := newSideEffectProcessor(sideEffectProcessorConfig{
+					durableEnabled: true, retryBackoff: time.Second, store: files,
+					logger: slog.New(slog.NewTextHandler(&logs, nil)),
+				})
+				p.replayDurablePending()
+				time.Sleep(p.retryBackoff)
+				synctest.Wait()
+				assert.Empty(t, p.queue, "failed loads must not permit delivery")
+				want := 1
+				msg := &dummyMessenger{}
+				liveAttempts := 0
+				if name != "recovered only" {
+					require.True(t, p.Submit(sideEffectRequest{messenger: msg}))
+					want++
+				}
+				if name == "with retrying live task" {
+					msg.sendErr = errors.New("delivery failed")
+					p.process(<-p.queue)
+					liveAttempts = 1
+					msg.sendErr = nil
+				}
+				require.NoError(t, os.Remove(blocked))
+				time.Sleep(p.retryBackoff)
+				synctest.Wait()
+				require.Len(t, p.queue, want, "resume recovery without requeuing live work")
+				assert.Equal(t, 2, bytes.Count(logs.Bytes(), []byte("load pending")))
+				for range want {
+					task := <-p.queue
+					if task.id == recoveredID {
+						assert.Equal(t, 1, task.attempts, "load retries do not reserve attempts")
+					} else {
+						assert.Equal(t, liveAttempts, task.attempts)
+					}
+					p.process(task)
+				}
+				time.Sleep(2 * p.retryBackoff)
+				synctest.Wait()
+				assert.Empty(t, p.queue, "successful recovery must stop retrying the load")
+				pending, err := files.Pending()
+				require.NoError(t, err)
+				assert.Empty(t, pending)
+				assert.Zero(t, p.Drops())
+				assert.Equal(t, want-1+liveAttempts, msg.Calls())
+			})
+		})
+	}
+}

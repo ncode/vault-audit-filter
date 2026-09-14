@@ -104,6 +104,12 @@ The system SHALL retain recoverable pending work until the dead-letter record is
 
 Failed dead-letter storage or cleanup SHALL retry automatically in the running process using the existing retry backoff. These retries SHALL NOT consume delivery attempts, invoke delivery, or increment the queue's drop count for recoverable durable work.
 
+#### Scenario: Initial pending load fails
+
+- **WHEN** reading pending tasks or their dead-letter state fails during startup recovery
+- **THEN** the system SHALL retry the pending load using the existing retry backoff until it succeeds
+- **AND** load retries SHALL NOT consume delivery attempts or enqueue tasks already accepted by the current processor a second time
+
 #### Scenario: Storage becomes available again
 
 - **WHEN** dead-letter storage initially fails and subsequently recovers
