@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/bytedance/sonic v1.15.5
-	github.com/expr-lang/expr v1.17.8
+	github.com/expr-lang/expr v1.18.1
 	github.com/hashicorp/vault/api v1.23.0
 	github.com/panjf2000/gnet/v2 v2.10.0
 	github.com/slack-go/slack v0.34.0
